@@ -245,7 +245,6 @@ Fix: Resolve IP conflict first, then verify: sudo ufw allow 22
 
 Harris — Cloud & AI Explorer  
 Intern at Cloudify Asia  
-GDG On Campus UTM | GDG On Campus George Town
 
 ---
 
