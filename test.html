@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+body { background: #0f1117; margin: 0; }
+.bubble {
+  position: fixed;
+  bottom: 24px;
+  left: 24px;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: #3182ce;
+  border: none;
+  cursor: pointer;
+  z-index: 99999;
+  font-size: 1.5rem;
+}
+.window {
+  position: fixed;
+  bottom: 90px;
+  left: 24px;
+  width: 380px;
+  height: 400px;
+  background: #1a1d2e;
+  border: 1px solid #2d3748;
+  border-radius: 16px;
+  display: none;
+  padding: 1rem;
+  color: white;
+  z-index: 99998;
+}
+.window.open { display: block; }
+</style>
+</head>
+<body>
+<button class="bubble" onclick="document.getElementById('win').classList.toggle('open')">💬</button>
+<div class="window" id="win">
+  <p>Chat window works!</p>
+</div>
+</body>
+</html>
