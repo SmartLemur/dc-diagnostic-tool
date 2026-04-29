@@ -1,0 +1,5 @@
+nexdeploy.db
+.secret_key
+*.env
+__pycache__/
+*.pyc
