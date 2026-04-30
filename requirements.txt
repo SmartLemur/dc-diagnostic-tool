@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+requests
+paramiko
+pywinrm
+bcrypt
+cryptography
+python-jose[cryptography]
+python-multipart
+sqlalchemy
