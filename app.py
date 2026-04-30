@@ -606,6 +606,16 @@ fetch('/run_diagnostic', {
 });
 </script></body></html>"""
 
+
+@app.get("/api/switch")
+async def api_switch():
+    try:
+        from switch import get_switch_summary
+        data = get_switch_summary()
+        return JSONResponse(data)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

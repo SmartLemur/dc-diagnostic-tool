@@ -71,7 +71,17 @@ body{font-family:'Segoe UI',sans-serif;background:#0f1117;color:#e2e8f0;height:1
     <div class="server-grid" id="serverGrid">
       <div class="loading-box"><div class="spinner"></div>Loading servers...</div>
     </div>
-    <div class="section-label">Network Diagnostic</div>
+    
+    <div style="margin-top:1.5rem">
+      <div style="display:flex;align-items:center;margin-bottom:0.75rem">
+        <span class="section-label" style="margin:0">Switch Port Status — H3C</span>
+        <button class="refresh-btn" style="margin-left:auto" onclick="loadSwitch()">Refresh</button>
+      </div>
+      <div id="switchData" style="background:#1a1d2e;border:1px solid #2d3748;border-radius:10px;padding:1rem;color:#718096;font-size:0.85rem">
+        <div class="loading-box"><div class="spinner"></div>Loading switch data...</div>
+      </div>
+    </div>
+<div class="section-label">Network Diagnostic</div>
     <div style="background:#1a1d2e;border:1px solid #2d3748;border-radius:10px;padding:1rem;color:#718096;font-size:0.85rem">
       Use the chat on the right — type check [server IP] to run a diagnostic.
     </div>
@@ -236,7 +246,49 @@ function send() {
   });
 }
 
+
+function loadSwitch() {
+  var box = document.getElementById('switchData');
+  box.innerHTML = '<div style="text-align:center;padding:1rem;color:#718096"><div class="spinner" style="margin:0 auto 0.5rem"></div>Loading...</div>';
+  fetch('/api/switch')
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.error) {
+        box.innerHTML = '<div style="color:#fc8181">Error: ' + data.error + '</div>';
+        return;
+      }
+      var html = '<div style="display:flex;gap:1rem;margin-bottom:1rem">';
+      html += '<span style="background:#276749;color:#9ae6b4;padding:0.2rem 0.6rem;border-radius:4px;font-size:0.75rem;font-weight:600">UP: ' + data.up_count + '</span>';
+      html += '<span style="background:#2d3748;color:#718096;padding:0.2rem 0.6rem;border-radius:4px;font-size:0.75rem;font-weight:600">DOWN: ' + data.down_count + '</span>';
+      html += '<span style="background:#2b4c7e;color:#90cdf4;padding:0.2rem 0.6rem;border-radius:4px;font-size:0.75rem;font-weight:600">TOTAL: ' + data.total_ports + '</span>';
+      html += '</div>';
+      html += '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:0.5rem">';
+      var allPorts = data.up_ports.concat(data.down_ports);
+      for (var i = 0; i < allPorts.length; i++) {
+        var p = allPorts[i];
+        var isUp = p.status === 'UP';
+        var bg = isUp ? '#276749' : '#2d3748';
+        var color = isUp ? '#9ae6b4' : '#718096';
+        var border = isUp ? '#48bb78' : '#4a5568';
+        html += '<div style="background:' + bg + ';border:1px solid ' + border + ';border-radius:6px;padding:0.5rem 0.75rem">';
+        html += '<div style="font-size:0.75rem;font-weight:600;color:' + color + '">' + p.interface + '</div>';
+        html += '<div style="font-size:0.7rem;color:' + color + ';opacity:0.8">' + p.status + ' · ' + p.speed + ' · VLAN ' + p.vlan + '</div>';
+        if (p.description) {
+          html += '<div style="font-size:0.65rem;color:' + color + ';opacity:0.7;margin-top:0.2rem">' + p.description + '</div>';
+        }
+        html += '</div>';
+      }
+      html += '</div>';
+      box.innerHTML = html;
+    })
+    .catch(function(e) {
+      box.innerHTML = '<div style="color:#fc8181">Failed: ' + e.message + '</div>';
+    });
+}
+
 loadServers();
+loadSwitch();
 setInterval(loadServers, 30000);
+setInterval(loadSwitch, 15000);
 </script>
 </body></html>
