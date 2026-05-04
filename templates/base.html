@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NexDeploy AI</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <div class="header-brand">
+    <h1>NexDeploy AI</h1>
+    <p>Intelligent Server Deployment Assistant</p>
+  </div>
+  <div class="header-right">
+    <span class="user-badge">👤 {{ user }}</span>
+    <button class="btn-logout" onclick="window.location='/logout'">Sign Out</button>
+  </div>
+</div>
+
+<!-- Main -->
+<div class="main">
+
+  <!-- Left sidebar navigation -->
+  <div class="sidebar">
+    <div class="nav-item active" id="nav-topology" onclick="navigate('topology')">
+      <span class="nav-icon">🗺</span> Topology
+    </div>
+    <div class="nav-item" id="nav-servers" onclick="navigate('servers')">
+      <span class="nav-icon">🖥</span> Servers
+    </div>
+    <div class="nav-item" id="nav-switches" onclick="navigate('switches')">
+      <span class="nav-icon">🔀</span> Switches
+    </div>
+    <div class="nav-item" id="nav-eventlog" onclick="navigate('eventlog')">
+      <span class="nav-icon">📋</span> Event Log
+    </div>
+    <div class="nav-item" id="nav-settings" onclick="navigate('settings')">
+      <span class="nav-icon">⚙</span> Settings
+    </div>
+  </div>
+
+  <!-- Main content area -->
+  <div class="content" id="content">
+    <div class="loading-box">
+      <div class="spinner"></div>
+      Loading...
+    </div>
+  </div>
+
+  <!-- Right chatbot -->
+  <div class="chat-sidebar">
+    <div class="chat-header">
+      <div class="chat-avatar">AI</div>
+      <div>
+        <div class="chat-title">NexDeploy Assistant</div>
+        <div class="chat-status">● Online</div>
+      </div>
+    </div>
+    <div class="chat-messages" id="chatMessages">
+      <div class="msg ai">
+        Hi {{ user }}! I am your NexDeploy assistant.<br><br>
+        Type <strong>check [IP]</strong> to run a diagnostic, or ask me anything about your servers and network.
+      </div>
+    </div>
+    <div class="chat-input-area">
+      <input class="chat-input" id="chatInput" type="text" placeholder="Type a message...">
+      <button class="chat-send" onclick="sendChat()">&#10148;</button>
+    </div>
+  </div>
+
+</div>
+
+<!-- Add Device Modal -->
+<div class="modal-overlay" id="modal-overlay" onclick="if(event.target===this)closeModal()">
+  <div class="modal">
+    <div class="modal-title">Add New Device</div>
+    <form id="addDeviceForm">
+      <div class="form-group">
+        <label>Device Name</label>
+        <input type="text" id="deviceName" placeholder="e.g. S2D-Node3">
+      </div>
+      <div class="form-group">
+        <label>Device Type</label>
+        <select id="deviceType">
+          <option value="ilo">Server — iLO/iDRAC (HPE/Dell/H3C)</option>
+          <option value="switch">Switch (H3C/Cisco)</option>
+          <option value="router">Router</option>
+        </select>
+      </div>
+      <div class="form-group">
+        <label>IP Address</label>
+        <input type="text" id="deviceIp" placeholder="e.g. 192.168.99.200">
+      </div>
+      <div class="form-group">
+        <label>Username</label>
+        <input type="text" id="deviceUsername" placeholder="e.g. admin">
+      </div>
+      <div class="form-group">
+        <label>Password</label>
+        <input type="password" id="devicePassword" placeholder="Enter password">
+      </div>
+    </form>
+    <div class="modal-footer">
+      <button class="btn btn-outline" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="saveDevice()">Save Device</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+<script>
+  // Load default page on start
+  loadPage('topology');
+</script>
+</body>
+</html>

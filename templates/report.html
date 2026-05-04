@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Report — {{ target_ip }}</title>
+<link rel="stylesheet" href="/static/style.css">
+<style>
+.report-header { background: #1a1d2e; border-bottom: 1px solid #2d3748; padding: 1rem 2rem; display: flex; align-items: center; gap: 1rem; }
+.report-header h1 { font-size: 1rem; font-weight: 600; }
+.back-btn { background: none; border: 1px solid #2d3748; color: #a0aec0; padding: 0.4rem 0.9rem; border-radius: 6px; cursor: pointer; font-size: 0.85rem; }
+.report-container { max-width: 900px; margin: 2rem auto; padding: 0 1.5rem; }
+.check-row { display: flex; align-items: center; gap: 0.75rem; padding: 0.6rem 0; border-bottom: 1px solid #2d3748; }
+.check-ok { color: #48bb78; font-weight: 700; }
+.check-fail { color: #fc8181; font-weight: 700; }
+.detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0.5rem; }
+.detail-item { background: #0f1117; border-radius: 6px; padding: 0.5rem 0.75rem; }
+.detail-label { font-size: 0.75rem; color: #718096; }
+.detail-value { font-size: 0.85rem; word-break: break-all; margin-top: 0.1rem; }
+</style>
+</head>
+<body style="background:#0f1117;color:#e2e8f0;min-height:100vh">
+<div class="report-header">
+  <button class="back-btn" onclick="window.close()">← Close</button>
+  <h1>Full Diagnostic Report — {{ target_ip }}</h1>
+</div>
+<div class="report-container" id="reportContent">
+  <div class="card">
+    <div class="loading-box">
+      <div class="spinner"></div>
+      Running diagnostic on {{ target_ip }}...
+    </div>
+  </div>
+</div>
+<script>
+var labels = {
+  gateway_reachable: 'Gateway reachable',
+  server_reachable: 'Server reachable (ping)',
+  dns_working: 'DNS resolution',
+  ssh_open: 'SSH port 22 (Linux)',
+  winrm_open: 'WinRM port 5985 (Windows)',
+  http_open: 'HTTP port 80',
+  https_open: 'HTTPS port 443'
+};
+
+fetch('/run_diagnostic', {
+  method: 'POST',
+  headers: {'Content-Type': 'application/json'},
+  body: JSON.stringify({
+    target_ip: '{{ target_ip }}',
+    gateway_ip: '{{ gateway_ip }}',
+    dns_server: '{{ dns_server }}',
+    username: '{{ username }}',
+    password: '{{ password }}',
+    session_id: 'report'
+  })
+})
+.then(function(r) { return r.json(); })
+.then(function(data) {
+  var checks = '';
+  var rkeys = Object.keys(data.results || {});
+  for (var i = 0; i < rkeys.length; i++) {
+    var k = rkeys[i];
+    var v = data.results[k];
+    checks += '<div class="check-row">';
+    checks += '<span class="' + (v ? 'check-ok' : 'check-fail') + '">' + (v ? '✓' : '✗') + '</span>';
+    checks += '<span style="font-size:0.9rem">' + (labels[k] || k) + '</span>';
+    checks += '</div>';
+  }
+
+  var deep = '';
+  var dkeys = Object.keys(data.details || {});
+  for (var j = 0; j < dkeys.length; j++) {
+    var dk = dkeys[j];
+    if (dk === 'os_type') continue;
+    deep += '<div class="detail-item">';
+    deep += '<div class="detail-label">' + dk.replace(/_/g, ' ') + '</div>';
+    deep += '<div class="detail-value">' + data.details[dk] + '</div>';
+    deep += '</div>';
+  }
+
+  var conflict = data.conflict ?
+    '<div style="background:#742a2a;border:1px solid #fc8181;border-radius:8px;padding:0.75rem 1rem;margin-bottom:1rem;color:#fc8181">IP Conflict: ' + data.conflict_info + '</div>' : '';
+
+  var osBadge = '<span style="background:#2b4c7e;color:#90cdf4;padding:0.2rem 0.6rem;border-radius:4px;font-size:0.75rem;margin-left:0.5rem">' + (data.os_type || '').toUpperCase() + '</span>';
+
+  document.getElementById('reportContent').innerHTML =
+    conflict +
+    '<div class="card"><div class="card-title">Network Checks ' + osBadge + '</div>' + checks + '</div>' +
+    '<div class="card"><div class="card-title">Deep Scan Results</div><div class="detail-grid">' + deep + '</div></div>' +
+    '<div class="card"><div class="card-title">AI Diagnosis</div><div style="background:#0f1117;border-radius:8px;padding:1rem;font-size:0.88rem;line-height:1.7;white-space:pre-wrap">' + data.reply + '</div></div>';
+});
+</script>
+</body>
+</html>

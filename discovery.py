@@ -75,12 +75,22 @@ def classify_device(ip):
     }
 
 def identify_ilo(ip):
-    """Get server details from iLO Redfish API"""
-    credentials = [
-        ("cdfadmin", "QweAsd!23cdf"),
+    """Get server details from iLO Redfish API — tries database credentials first"""
+    try:
+        from database import get_devices
+        db_devices = get_devices(device_type="ilo")
+        db_creds = [(d["username"], d["password"]) for d in db_devices]
+    except:
+        db_creds = []
+
+    default_creds = [
         ("admin", "admin"),
-        ("Administrator", "admin123")
+        ("Administrator", "admin123"),
+        ("root", "root")
     ]
+
+    credentials = db_creds + default_creds
+    
     for username, password in credentials:
         try:
             response = requests.get(
