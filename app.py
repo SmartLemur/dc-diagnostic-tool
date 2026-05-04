@@ -19,6 +19,10 @@ sessions = {}
 
 init_db()
 
+# Start real time event monitor
+from events import start_event_monitor
+start_event_monitor()
+
 # ── Cache ────────────────────────────────────────────────────────────
 import threading
 import time
