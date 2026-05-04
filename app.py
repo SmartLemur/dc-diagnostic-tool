@@ -29,7 +29,7 @@ import time
 
 _cache = {}
 _cache_lock = threading.Lock()
-CACHE_TTL = 60  # seconds
+CACHE_TTL = 300  # seconds
 
 def get_cache(key):
     with _cache_lock:

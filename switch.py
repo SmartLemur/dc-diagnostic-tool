@@ -261,3 +261,144 @@ if __name__ == "__main__":
                 print(f"  Total: {summary['total_ports']} | UP: {summary['up_count']} | DOWN: {summary['down_count']}")
                 for p in summary.get('up_ports', []):
                     print(f"  {p['interface']} - {p['speed']} - VLAN {p['vlan']}")
+
+
+def get_vlans(ip=None, username=None, password=None, brand=None):
+    """Get all valid VLANs from switch dynamically"""
+    if not ip:
+        switches = get_switches_from_db()
+        if not switches:
+            return {"error": "No switches in database"}
+        sw = switches[0]
+        ip = sw["ip"]
+        username = sw["username"]
+        password = sw["password"]
+        brand = sw.get("brand", "unknown")
+
+    if brand and "cisco" in brand.lower():
+        command = SWITCH_COMMANDS["cisco"]["show_vlan"]
+    else:
+        command = SWITCH_COMMANDS["h3c"]["show_vlan"]
+
+    output, _ = get_switch_output(ip, username, password, command, wait=3)
+    if output.startswith("ERROR"):
+        return {"error": output}
+
+    vlans = []
+    for line in output.split('\n'):
+        line = line.strip()
+        if 'VLAN ID:' in line:
+            try:
+                vlan_id = int(line.split('VLAN ID:')[1].strip())
+                vlans.append(vlan_id)
+            except:
+                pass
+        elif line.startswith('VLAN') and 'active' in line.lower():
+            try:
+                vlan_id = int(line.split()[1])
+                vlans.append(vlan_id)
+            except:
+                pass
+    return vlans
+
+def configure_port_vlan(interface, vlan_id, ip=None, username=None, password=None, brand=None):
+    """Configure switch port VLAN — dynamic, works for any switch"""
+    if not ip:
+        switches = get_switches_from_db()
+        if not switches:
+            return {"success": False, "error": "No switches in database"}
+        sw = switches[0]
+        ip = sw["ip"]
+        username = sw["username"]
+        password = sw["password"]
+        brand = sw.get("brand", "unknown")
+
+    try:
+        client = ssh_connect(ip, username, password)
+        channel = client.invoke_shell()
+        time.sleep(2)
+        if channel.recv_ready():
+            channel.recv(65535)
+
+        if brand and "cisco" in brand.lower():
+            commands = [
+                "configure terminal",
+                f"interface {interface}",
+                "switchport mode access",
+                f"switchport access vlan {vlan_id}",
+                "end",
+                "write memory"
+            ]
+        else:
+            # H3C commands
+            commands = [
+                "system-view",
+                f"interface {interface}",
+                "port link-type access",
+                f"port access vlan {vlan_id}",
+                "quit",
+                "quit",
+                "save force"
+            ]
+
+        output = ""
+        for cmd in commands:
+            channel.send(cmd + "\n")
+            time.sleep(1)
+            if channel.recv_ready():
+                output += channel.recv(65535).decode('utf-8', errors='ignore')
+
+        client.close()
+
+        # Verify the change
+        time.sleep(2)
+        verify_output, _ = get_switch_output(
+            ip, username, password,
+            f"display interface {interface} brief" if "cisco" not in (brand or "").lower()
+            else f"show interface {interface} status",
+            wait=2
+        )
+
+        success = str(vlan_id) in verify_output
+        return {
+            "success": success,
+            "interface": interface,
+            "vlan_id": vlan_id,
+            "output": output[:500],
+            "verified": success
+        }
+
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+def get_port_details(interface, ip=None, username=None, password=None, brand=None):
+    """Get details of a specific port"""
+    if not ip:
+        switches = get_switches_from_db()
+        if not switches:
+            return {"error": "No switches in database"}
+        sw = switches[0]
+        ip = sw["ip"]
+        username = sw["username"]
+        password = sw["password"]
+        brand = sw.get("brand", "unknown")
+
+    if brand and "cisco" in brand.lower():
+        command = f"show interface {interface} status"
+    else:
+        command = f"display interface {interface} brief"
+
+    output, _ = get_switch_output(ip, username, password, command, wait=2)
+    if output.startswith("ERROR"):
+        return {"error": output}
+
+    for line in output.split('\n'):
+        parts = line.split()
+        if len(parts) >= 5 and interface in line:
+            return {
+                "interface": parts[0] if parts else interface,
+                "status": parts[1] if len(parts) > 1 else "Unknown",
+                "speed": parts[2] if len(parts) > 2 else "Unknown",
+                "vlan": parts[5] if len(parts) > 5 else "Unknown"
+            }
+    return {"interface": interface, "status": "Unknown", "speed": "Unknown", "vlan": "Unknown"}
