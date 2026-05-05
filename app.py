@@ -221,31 +221,36 @@ def ask_ai(prompt):
         return f"Error: {e}"
 
 
-def ask_hermes(message, session_id=None):
-    """Call DeepSeek API directly — fast, reliable"""
+def ask_ai(message, session_id=None):
+    """Call DeepSeek API directly — reads config from .env"""
     try:
-        # Read API key from project .env file
         env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
         api_key = ""
+        base_url = "https://api.deepseek.com/v1"
+        model = "deepseek-chat"
+
         if os.path.exists(env_path):
             with open(env_path) as f:
                 for line in f:
                     line = line.strip()
                     if line.startswith("DEEPSEEK_API_KEY"):
                         api_key = line.split("=", 1)[-1].strip().strip('"').strip("'")
-                        break
+                    elif line.startswith("DEEPSEEK_BASE_URL"):
+                        base_url = line.split("=", 1)[-1].strip().strip('"').strip("'")
+                    elif line.startswith("DEEPSEEK_MODEL"):
+                        model = line.split("=", 1)[-1].strip().strip('"').strip("'")
 
         if not api_key:
             return "API key not configured. Add DEEPSEEK_API_KEY to .env file."
 
         response = requests.post(
-            "https://500.tokenvisor.ai/api/v1/chat/completions",
+            f"{base_url}/chat/completions",
             headers={
                 "Authorization": f"Bearer {api_key}",
                 "Content-Type": "application/json"
             },
             json={
-                "model": "deepseek-ai/DeepSeek-V3.2",
+                "model": model,
                 "messages": [
                     {"role": "user", "content": message}
                 ],
@@ -264,10 +269,6 @@ def ask_hermes(message, session_id=None):
         return "Request timed out. Please try again."
     except Exception as e:
         return f"Error: {str(e)}"
-
-def extract_ip(text):
-    m = re.findall(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', text)
-    return m[0] if m else None
 
 # ── Event log helpers ────────────────────────────────────────────────
 
@@ -358,6 +359,21 @@ async def api_switch(session_token: str = Cookie(None)):
         data = get_switch_summary()
         set_cache("switch", data)
         return JSONResponse(data)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+@app.get("/api/switch/port/{interface:path}")
+async def api_port_config(interface: str):
+    try:
+        from switch import get_port_raw_config, get_port_details
+        raw = get_port_raw_config(interface)
+        details = get_port_details(interface)
+        return JSONResponse({
+            "interface": interface,
+            "details": details,
+            "raw_config": raw.get("raw_config", ""),
+            "full_interface": raw.get("full_interface", interface)
+        })
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -464,47 +480,242 @@ async def chat(request: Request, session_token: str = Cookie(None)):
     sid = data.get("session_id", user)
     msg = data.get("message", "").strip()
     if sid not in sessions:
-        sessions[sid] = {"step":"idle","data":{}}
+        sessions[sid] = {"step": "idle", "data": {}, "history": []}
 
-    # Fetch live data from cache
-    live_servers = ""
-    live_switch = ""
-    
-    try:
-        servers = get_cache("servers") or get_all_servers_status()
-        for key, s in servers.items():
-            if "error" not in s:
-                live_servers += f"- {s.get('name', key)} ({s.get('ilo_ip', 'unknown IP')}) | Power: {s.get('power_state')} | Health: {s.get('overall_health')} | RAM: {s.get('ram_gb')}GB\n"
-                hd = s.get('health_details', {})
-                for k, v in hd.items():
-                    if v != 'OK':
-                        live_servers += f"  WARNING: {k.replace('_',' ')}: {v}\n"
-    except:
-        live_servers = "- S2D-Node1 (192.168.99.104) - HPE ProLiant DL380 Gen10\n- S2D-Node2 (192.168.99.102) - HPE ProLiant DL380 Gen10\n"
+    session = sessions[sid]
+    pending = session.get("pending_action")
 
-    try:
-        switch = get_cache("switch") or {}
-        live_switch = f"H3C Switch (192.168.99.5): {switch.get('up_count', '?')} ports UP, {switch.get('down_count', '?')} ports DOWN out of {switch.get('total_ports', '?')} total ports"
-    except:
-        live_switch = "H3C Switch (192.168.99.5): status unknown"
+    # ── Handle confirmation for pending actions ──
+    if pending and msg.lower() in ["yes", "confirm", "y", "ok", "proceed"]:
+        action_type = pending.get("type")
 
-    context = f"""You are NexDeploy AI assistant for Cloudify Asia data centre.
+        if action_type == "configure_port":
+            interface = pending.get("interface")
+            vlan_id = pending.get("vlan_id")
+            try:
+                from switch import configure_port_vlan
+                result = configure_port_vlan(interface, vlan_id)
+                session["pending_action"] = None
+                if result.get("success"):
+                    log_action(user, "SWITCH_CONFIG", f"Port {interface} changed to VLAN {vlan_id}")
+                    try:
+                        from switch import get_port_details
+                        updated = get_port_details(interface)
+                        reply = f"Done! Port {interface} has been configured.\n\nUpdated configuration:\nPort: {interface}\nStatus: {updated.get('status', 'Unknown')}\nSpeed: {updated.get('speed', 'Unknown')}\nVLAN: {updated.get('vlan', 'Unknown')}\n\nChange verified successfully."
+                    except:
+                        reply = f"Done! Port {interface} has been changed to VLAN {vlan_id} successfully."
+                else:
+                    reply = f"Failed to configure port: {result.get('error', 'Unknown error')}"
+            except Exception as e:
+                session["pending_action"] = None
+                reply = f"Error executing switch config: {str(e)}"
+            return JSONResponse({"reply": reply, "step": "idle"})
+
+        elif action_type == "power_action":
+            server_key = pending.get("server_key")
+            action = pending.get("action")
+            try:
+                from ilo import power_action
+                result = power_action(server_key, action)
+                session["pending_action"] = None
+                if result.get("success"):
+                    log_action(user, "POWER_ACTION", f"Server {server_key} action: {action}")
+                    reply = f"Done! {action} executed on {server_key} successfully."
+                else:
+                    reply = f"Failed: {result.get('error', 'Unknown error')}"
+            except Exception as e:
+                session["pending_action"] = None
+                reply = f"Error: {str(e)}"
+            return JSONResponse({"reply": reply, "step": "idle"})
+
+    # ── Handle cancellation ──
+    if pending and msg.lower() in ["no", "cancel", "n", "abort"]:
+        session["pending_action"] = None
+        return JSONResponse({"reply": "Action cancelled. No changes were made.", "step": "idle"})
+
+
+# ── Detect port info request ──
+    import re as re_mod
+    port_info_match = re_mod.search(
+        r'(?:show|display|get|check|what is)\s+(?:config|configuration|info|details|status).*?(?:port|interface)\s+([\w\/]+)',
+        msg.lower()
+    ) or re_mod.search(
+        r'(?:port|interface)\s+([\w\/]+).*?(?:config|configuration|info|details|status)',
+        msg.lower()
+    )
+
+    if port_info_match:
+        interface = port_info_match.group(1).upper()
+        try:
+            from switch import get_port_details
+            port = get_port_details(interface)
+            reply = f"Current configuration for {interface}:\nStatus: {port.get('status', 'Unknown')}\nSpeed: {port.get('speed', 'Unknown')}\nVLAN: {port.get('vlan', 'Unknown')}\nType: {port.get('type', 'Unknown')}"
+            if port.get('description'):
+                reply += f"\nDescription: {port.get('description')}"
+            return JSONResponse({"reply": reply, "step": "idle"})
+        except Exception as e:
+            return JSONResponse({"reply": f"Error getting port info: {str(e)}", "step": "idle"})
+    # ── Detect switch port configuration request ──
+    import re as re_mod
+    port_vlan_match = re_mod.search(
+        r'(?:set|change|configure|assign)\s+port\s+([\w\/]+)\s+(?:to\s+)?vlan\s+(\d+)',
+        msg.lower()
+    )
+
+    if port_vlan_match:
+        interface_raw = port_vlan_match.group(1).upper()
+        vlan_id = int(port_vlan_match.group(2))
+
+        # Normalize interface name
+        interface = interface_raw
+        if not any(x in interface for x in ['WGE', 'HGE', 'GE', 'XGE']):
+            interface = f"WGE1/0/{interface_raw}"
+
+        try:
+            from switch import get_port_details, get_vlans
+            port_info = get_port_details(interface)
+            available_vlans = get_vlans()
+
+            current_status = port_info.get("status", "Unknown")
+            current_vlan = port_info.get("vlan", "Unknown")
+            current_speed = port_info.get("speed", "Unknown")
+
+            warning = ""
+            if current_status == "UP":
+                warning = f"\nWARNING: This port is currently ACTIVE. Changing VLAN may disrupt connected device."
+
+            if isinstance(available_vlans, list) and vlan_id not in available_vlans:
+                reply = f"VLAN {vlan_id} does not exist on this switch. Available VLANs: {available_vlans}"
+                return JSONResponse({"reply": reply, "step": "idle"})
+
+            session["pending_action"] = {
+                "type": "configure_port",
+                "interface": interface,
+                "vlan_id": vlan_id
+            }
+
+            reply = f"Port {interface} is currently {current_status}, speed {current_speed}, VLAN {current_vlan}.{warning}\n\nI plan to change VLAN to {vlan_id}.\nAvailable VLANs: {available_vlans}\n\nConfirm? (yes/no)"
+            return JSONResponse({"reply": reply, "step": "confirm"})
+
+        except Exception as e:
+            reply = f"Error getting port details: {str(e)}"
+            return JSONResponse({"reply": reply, "step": "idle"})
+
+    # ── Detect power action request ──
+    power_match = re_mod.search(
+        r'(restart|reboot|shutdown|power\s+off|power\s+on|turn\s+off|turn\s+on)\s+(?:server\s+)?([\w\-]+)',
+        msg.lower()
+    )
+
+    if power_match:
+        action_word = power_match.group(1).strip()
+        server_name = power_match.group(2).strip()
+
+        action_map = {
+            "restart": "GracefulRestart",
+            "reboot": "GracefulRestart",
+            "shutdown": "GracefulShutdown",
+            "power off": "ForceOff",
+            "turn off": "GracefulShutdown",
+            "power on": "On",
+            "turn on": "On"
+        }
+        action = action_map.get(action_word, "GracefulRestart")
+
+        try:
+            from ilo import get_ilo_servers
+            servers = get_ilo_servers()
+            server_key = None
+            server_display_name = server_name
+
+            for key, srv in servers.items():
+                if server_name.lower() in srv.get("name", "").lower() or \
+                   server_name.lower() in key.lower() or \
+                   server_name in srv.get("ip", ""):
+                    server_key = key
+                    server_display_name = srv.get("name", key)
+                    break
+
+            if not server_key and servers:
+                server_key = list(servers.keys())[0]
+                server_display_name = servers[server_key].get("name", server_key)
+
+            if server_key:
+                session["pending_action"] = {
+                    "type": "power_action",
+                    "server_key": server_key,
+                    "action": action
+                }
+                reply = f"I plan to execute {action} on {server_display_name}.\n\nWARNING: This will affect the server immediately.\n\nConfirm? (yes/no)"
+                return JSONResponse({"reply": reply, "step": "confirm"})
+            else:
+                reply = "No servers found in database. Add servers via Settings page."
+                return JSONResponse({"reply": reply, "step": "idle"})
+
+        except Exception as e:
+            reply = f"Error: {str(e)}"
+            return JSONResponse({"reply": reply, "step": "idle"})
+
+    # ── Default — pass to DeepSeek with full context ──
+    context_parts = []
+    context_parts.append("""You are NexDeploy AI assistant for Cloudify Asia data centre.
 You help engineers with server deployment, network diagnostics, and infrastructure management.
-Answer in plain text only - no markdown symbols like * or #.
-Keep responses short and practical - maximum 4 sentences.
+Answer in plain text only. Keep responses concise and practical — maximum 4 sentences.
+For switch port config say: 'Type: set port [PORT] to vlan [NUMBER]'
+For server power say: 'Type: restart/shutdown [server name]'""")
 
-LIVE SYSTEM STATUS (real time):
+    try:
+        servers = get_cache("servers")
+        if not servers:
+            servers = get_all_servers_status()
+        if servers:
+            server_lines = ["\nLIVE SERVER STATUS:"]
+            for key, s in servers.items():
+                if "error" not in s:
+                    server_lines.append(f"Server: {s.get('name', key)} | Power: {s.get('power_state')} | Health: {s.get('overall_health')} | RAM: {s.get('ram_gb')}GB")
+                    hd = s.get('health_details', {})
+                    for k, v in hd.items():
+                        if v != 'OK':
+                            server_lines.append(f"  ALERT: {k}: {v}")
+            context_parts.append("\n".join(server_lines))
+    except: pass
 
-Servers:
-{live_servers}
-Network:
-- {live_switch}
-- Cisco Catalyst 3550 (192.168.99.144) - managed switch
-- HarrisPlayground AI Server (192.168.99.142) - Ubuntu 24.04, runs NexDeploy
+    try:
+        switch = get_cache("switch")
+        if not switch:
+            from switch import get_switch_summary
+            switch = get_switch_summary()
+        if switch and "error" not in switch:
+            context_parts.append(f"\nSWITCH STATUS: {switch.get('up_count')} ports UP, {switch.get('down_count')} ports DOWN")
+    except: pass
 
-Engineer message: {msg}"""
+    try:
+        db_devices = get_devices()
+        if db_devices:
+            dev_lines = ["\nREGISTERED DEVICES:"]
+            for d in db_devices:
+                dev_lines.append(f"  {d.get('name')} | {d.get('ip')} | {d.get('type')} | {d.get('brand')}")
+            context_parts.append("\n".join(dev_lines))
+    except: pass
 
-    reply = ask_hermes(context)
+    # Conversation history
+    history = session.get("history", [])
+    if history:
+        hist_lines = ["\nCONVERSATION HISTORY:"]
+        for h in history[-4:]:
+            hist_lines.append(f"Engineer: {h.get('user', '')}")
+            hist_lines.append(f"Assistant: {h.get('reply', '')[:100]}")
+        context_parts.append("\n".join(hist_lines))
+
+    context_parts.append(f"\nEngineer says: {msg}")
+    full_context = "\n".join(context_parts)
+
+    reply = ask_ai(full_context)
+
+    session["history"].append({"user": msg, "reply": reply})
+    if len(session["history"]) > 20:
+        session["history"] = session["history"][-20:]
+
     log_action(user, "CHAT", f"Message: {msg[:50]}")
     return JSONResponse({"reply": reply, "step": "idle"})
 

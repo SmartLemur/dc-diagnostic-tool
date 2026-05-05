@@ -258,6 +258,38 @@ def fix_gitignore():
         print_fail(f"Failed: {e}")
     return True
 
+
+def setup_env():
+    print_step(8, "Setting up API configuration...")
+    env_path = os.path.join(PROJECT_DIR, ".env")
+    
+    if os.path.exists(env_path):
+        print_ok(".env file already exists — skipping")
+        return True
+    
+    print("  DeepSeek API configuration needed.")
+    print("  Press Enter to use defaults or type your values.\n")
+    
+    api_key = input("  DEEPSEEK_API_KEY: ").strip()
+    base_url = input("  DEEPSEEK_BASE_URL (default: https://api.deepseek.com/v1): ").strip()
+    model = input("  DEEPSEEK_MODEL (default: deepseek-chat): ").strip()
+    
+    if not base_url:
+        base_url = "https://api.deepseek.com/v1"
+    if not model:
+        model = "deepseek-chat"
+    
+    if api_key:
+        with open(env_path, 'w') as f:
+            f.write(f"DEEPSEEK_API_KEY={api_key}\n")
+            f.write(f"DEEPSEEK_BASE_URL={base_url}\n")
+            f.write(f"DEEPSEEK_MODEL={model}\n")
+        print_ok(".env file created successfully")
+    else:
+        print_warn("No API key provided — chatbot will not work until .env is configured")
+    return True
+
+
 def print_summary():
     print("\n" + "="*60)
     print("NexDeploy AI — Setup Complete!")
@@ -289,6 +321,7 @@ def main():
         fix_app_path,
         setup_hermes_skill,
         fix_gitignore,
+        setup_env,
     ]
 
     failed = []

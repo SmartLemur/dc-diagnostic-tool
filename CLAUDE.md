@@ -16,48 +16,41 @@ and it executes tasks automatically.
 ## How To Run
 
 ```bash
+# First time setup
 cd ~/diagnostic-tool
+python3 setup.py
+
+# Start the app
 python3 app.py
 ```
 
 Access at: `http://<server-ip>:8000`
 Default login: `admin` / `admin123`
 
-**First time setup:**
-```bash
-python3 database.py  # creates database and admin account
-python3 app.py       # start the web app
-```
-
 ---
 
-## Full File Structure
-
-```
+## File Structure
 diagnostic-tool/
-├── app.py              # FastAPI routes only — no HTML inside
-├── ilo.py              # Brand-agnostic BMC/iLO/iDRAC integration (Redfish API)
-├── switch.py           # Brand-agnostic switch integration (H3C, Cisco, Juniper)
-├── topology.py         # Network topology builder — combines ARP + MAC + database
-├── discovery.py        # Network discovery — ARP scan + device classification
-├── database.py         # SQLite database functions + encrypted credential storage
-├── auth.py             # Login, session management, bcrypt password hashing
-├── diagnostic.py       # Legacy diagnostic functions (ping, DNS, ports, deep scan)
-│
+├── app.py              ← FastAPI routes, DeepSeek API call, chat logic
+├── ilo.py              ← HPE/Dell/H3C server BMC via Redfish (dynamic from DB)
+├── switch.py           ← Netmiko switch integration (80+ brands, dynamic from DB)
+├── topology.py         ← Network topology builder
+├── discovery.py        ← ARP scan + device classification
+├── database.py         ← SQLite + Fernet encryption
+├── auth.py             ← Login + session management
+├── events.py           ← Real time event detection background thread
+├── setup.py            ← First time setup wizard — run once on new machine
+├── CLAUDE.md           ← This file
 ├── static/
-│   ├── style.css       # All CSS — dark theme, component styles
-│   └── app.js          # All JavaScript — navigation, API calls, chatbot
-│
+│   ├── style.css       ← All CSS
+│   └── app.js          ← All JavaScript
 ├── templates/
-│   ├── base.html       # Main layout — sidebar nav + content area + chatbot
-│   ├── login.html      # Login page
-│   └── report.html     # Full diagnostic report page
-│
-├── nexdeploy.db        # SQLite database (NOT in GitHub)
-├── .secret_key         # Encryption key for credentials (NOT in GitHub)
-├── requirements.txt    # Python dependencies
-└── CLAUDE.md           # This file
-```
+│   ├── base.html       ← Main layout — sidebar + content + chatbot
+│   ├── login.html      ← Login page
+│   └── report.html     ← Full diagnostic report page
+├── .env                ← DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL (NOT in GitHub)
+├── nexdeploy.db        ← SQLite database (NOT in GitHub)
+└── .secret_key         ← Fernet encryption key (NOT in GitHub)
 
 ---
 
@@ -66,42 +59,46 @@ diagnostic-tool/
 | Layer | Technology |
 |---|---|
 | Backend | Python 3.12, FastAPI, Uvicorn |
-| Frontend | Vanilla HTML, CSS, JavaScript (no frameworks) |
+| Frontend | Vanilla HTML, CSS, JavaScript — no frameworks |
 | Templates | Jinja2 |
-| AI (local) | Ollama + Gemma4:26b — for deep diagnostic analysis |
-| AI (fast) | Hermes Agent + DeepSeek V3.2 — for chatbot conversation |
+| AI Chatbot | Direct DeepSeek V3.2 API via requests library |
 | Server mgmt | Redfish REST API (HPE iLO, Dell iDRAC, H3C HDM) |
-| Switch mgmt | SSH via paramiko (H3C, Cisco, Juniper) |
+| Switch mgmt | Netmiko — 80+ switch brands supported |
 | Linux access | paramiko SSH |
 | Windows access | pywinrm WinRM |
-| Database | SQLite |
-| Encryption | cryptography.Fernet |
+| Database | SQLite with Fernet AES-256 encryption |
 | Auth | bcrypt + session tokens |
 | Network scan | arp-scan |
+| Event monitor | Python threading — background daemon |
+
+---
+
+## AI Architecture
+Web chatbot → Direct DeepSeek V3.2 API (1-3 second responses)
+Live system data injected as context before each message
+Conversation history stored per session
+Handles confirmation flow for dangerous actions
+Hermes Agent → Installed but NOT used for chatbot
+Kept for future Phase 3 autonomous background agent
+nexdeploy-dc skill written at ~/.hermes/skills/nexdeploy/nexdeploy-dc/SKILL.md
+
+DeepSeek config stored in `.env`:
+DEEPSEEK_API_KEY=your_key
+DEEPSEEK_BASE_URL=https://500.tokenvisor.ai/api/v1
+DEEPSEEK_MODEL=deepseek-ai/DeepSeek-V3.2
 
 ---
 
 ## Database Structure
 
 ```sql
--- Engineer login accounts
 users (id, username, password_hash, role, created_at)
-
--- All network devices — iLO, switches, routers
--- Credentials are AES-256 encrypted before storage
 devices (id, name, type, ip, username, password_encrypted, brand, model, added_by, created_at)
-
--- Full audit trail of all actions
 audit_log (id, username, action, details, timestamp)
-
--- Active login sessions
 sessions (id, username, token, expires_at, created_at)
 ```
 
-**Device types in database:**
-- `ilo` — server BMC (HPE iLO, Dell iDRAC, H3C HDM)
-- `switch` — network switch (H3C, Cisco, Juniper)
-- `router` — network router
+Device types: `ilo`, `switch`, `router`
 
 ---
 
@@ -109,20 +106,20 @@ sessions (id, username, token, expires_at, created_at)
 
 | Method | Endpoint | What it does |
 |---|---|---|
-| GET | `/` | Main dashboard (requires login) |
-| GET | `/login` | Login page |
-| POST | `/login` | Authenticate engineer |
+| GET | `/` | Main dashboard |
+| GET/POST | `/login` | Login page / authenticate |
 | GET | `/logout` | Clear session |
-| GET | `/api/servers` | Live iLO health data for all servers |
+| GET | `/api/servers` | Live iLO health data |
 | GET | `/api/switch` | Switch port status |
+| GET | `/api/switch/port/{interface}` | Raw config for specific port |
 | GET | `/api/topology` | Full network topology |
 | GET | `/api/events` | Audit log / event feed |
-| GET | `/api/devices` | All registered devices from database |
+| GET | `/api/devices` | All registered devices |
 | POST | `/api/devices` | Add new device |
 | DELETE | `/api/devices/{id}` | Delete device |
-| POST | `/api/change-password` | Change engineer password |
-| POST | `/chat` | Send message to AI chatbot |
-| POST | `/run_diagnostic` | Run full network diagnostic on a server |
+| POST | `/api/change-password` | Change password |
+| POST | `/chat` | AI chatbot message |
+| POST | `/run_diagnostic` | Run network diagnostic |
 | GET | `/report` | Full diagnostic report page |
 
 ---
@@ -130,167 +127,152 @@ sessions (id, username, token, expires_at, created_at)
 ## Key Architecture Decisions
 
 **Fully dynamic — no hardcoded IPs or credentials:**
-All device IPs, usernames and passwords are stored in SQLite database.
-Adding a new device via Settings page makes it immediately available to all functions.
-Anyone who clones the repo and adds their own devices gets a fully working system.
+Everything reads from SQLite database. Anyone clones repo, runs setup.py, adds their devices, system works with their infrastructure.
 
-**Brand-agnostic device support:**
-- `ilo.py` — works with HPE, Dell, H3C servers via Redfish standard API
-- `switch.py` — works with H3C, Cisco, Juniper switches via SSH
-- Brand is auto-detected from SSH banner or Redfish Manufacturer field
-- Correct commands selected automatically per brand via SWITCH_COMMANDS dict
+**Brand-agnostic servers:**
+ilo.py uses Redfish API — same standard for HPE, Dell, H3C. Auto-detects brand from Manufacturer field.
+
+**Brand-agnostic switches:**
+switch.py uses Netmiko — 80+ switch brands. Brand detected from SSH banner. Correct commands selected automatically via SWITCH_COMMANDS dict and BRAND_TO_NETMIKO mapping.
 
 **Caching system:**
-All slow API calls (iLO, switch SSH) are cached in memory.
-Cache warms up on startup in background thread.
-Pages load instantly after first load.
-Cache refreshes every 60 seconds staggered to avoid blocking.
+iLO and switch data cached in memory. Cache warms on startup. Pages load instantly. Refreshes every 60 seconds staggered.
 
-**Two AI models:**
-- Hermes Agent + DeepSeek V3.2 — fast cloud AI for chatbot conversation
-- Gemma4:26b via Ollama — local AI for sensitive deep diagnostic analysis
+**Chat confirmation flow:**
+Dangerous actions (port config, power control) handled by FastAPI session — not AI.
+Engineer types action → system asks confirm → engineer types yes → Python executes directly.
 
-**Hermes chatbot integration:**
-Chatbot calls Hermes via command line subprocess.
-Live system data (servers, switches, topology, events) injected into context before each call.
-Conversation history stored per session for memory.
+**Real time event detection:**
+events.py runs as background thread. Compares current vs previous state every 30 seconds.
+Detects: port up/down, server power changes, server health changes, new devices on network.
 
 ---
 
 ## Dashboard Pages
 
-**Topology (default)**
-Visual network diagram — auto-generated from ARP scan + MAC table + database.
-Shows all devices, connections, live status.
-
-**Servers**
-iLO health cards for all registered servers.
-Shows power state, health badges, RAM, CPU.
-Click card to run diagnostic.
-Add Server button — enters credentials, auto-detects brand.
-
-**Switches**
-Port grid for all registered switches.
-Green = UP, Grey = DOWN.
-Shows connected device per port.
-Add Switch button.
-
-**Event Log**
-Real time feed from audit_log table.
-Shows who did what and when.
-
-**Settings**
-Manage devices (add/delete).
-Change password.
+**Topology** — visual network diagram, auto-generated from ARP + MAC + database
+**Servers** — iLO health cards, power state, health badges
+**Switches** — port grid, click port for raw config (side panel — in progress)
+**Event Log** — real time feed from audit_log
+**Settings** — add/delete devices, change password
 
 ---
 
-## Network Discovery Flow
+## Chatbot Capabilities
 
-```
-1. ARP scan → finds all IPs and MACs on network
-2. Classify each IP (check ports 443, 22, 5985, 161)
-3. Identify device type (iLO/server/switch/unknown)
-4. Cross-reference with database for names
-5. Cross-reference MAC table from switch for port mapping
-6. Build topology diagram
-```
+Engineer can ask:
+- Server health status
+- Switch port status
+- Network topology
+- Run diagnostic on specific IP
+- Recent events
 
----
-
-## Environment Variables / Sensitive Files
-
-These files are in `.gitignore` and must NEVER be committed:
-- `nexdeploy.db` — contains encrypted credentials
-- `.secret_key` — Fernet encryption key (must travel with database)
-
-**Migration:** Always copy both files together. Different key = can't read database.
-
----
-
-## Current Lab Environment
-
-| Device | IP | Details |
-|---|---|---|
-| HarrisPlayground (AI server) | 192.168.99.105 | Ubuntu 24.04, runs NexDeploy |
-| S2D-Node1 | 192.168.99.104 | HPE ProLiant DL380 Gen10, iLO5 |
-| H3C Switch | 192.168.99.5 | SSH enabled, 51 ports |
-| Cisco Catalyst 3550 | 192.168.99.144 | SSH/Telnet enabled |
-| Router/Gateway | 192.168.99.1 | |
+Engineer can command (with approval gate):
+- Set port X to VLAN Y
+- Restart/shutdown server
+- Power on server
 
 ---
 
 ## What's Built and Working
 
-- Login system with session management
-- Encrypted credential storage
-- Live dashboard with sidebar navigation
-- iLO server health (Redfish API)
-- H3C switch port status (SSH)
+- Login system with bcrypt + session tokens
+- Dashboard with 5 navigation pages
+- Live iLO server health via Redfish API
+- H3C switch via Netmiko (54 ports, 6 UP detected)
+- Real time event detection (events.py)
+- Direct DeepSeek API chatbot (1-3 second responses)
+- Switch port config via chatbot with approval gate
+- Power control via chatbot with approval gate
 - Network topology auto-discovery
-- AI chatbot with live system context
-- Hermes Agent + DeepSeek V3.2 integration
-- Full diagnostic report (ping, DNS, ports, deep scan)
-- Linux deep scan via SSH
-- Windows deep scan via WinRM
-- OS auto-detection
-- IP conflict detection with MAC addresses
-- Audit logging
-- Add/delete devices from dashboard
-- Caching system for fast page loads
-- Page version control (no wrong page content on fast navigation)
+- Full diagnostic report
+- Audit logging + event log page
+- Add/delete devices from Settings
+- Caching system
+- Page version control (no wrong content on fast nav)
+- setup.py — fully portable
+- Netmiko — 80+ switch brands
+- Switch raw config API endpoint /api/switch/port/{interface}
 
 ---
 
-## What's Planned / Not Done Yet
+## What's Not Done Yet
 
-- OS installation via chatbot (needs ISO files + templates from senior)
-- Switch port configuration via chatbot (needs approval gate)
-- Real time event detection (cable plug/unplug state change)
-- Cisco switch SSH integration (have IP, need credentials)
-- iLO network access for new bare metal servers
-- Telegram/Slack alerts
-- Docker packaging (Phase 4)
-- UI/UX improvements (deferred)
+**Immediate (no blockers):**
+- Fix switch raw config 401 cookie issue
+- Switch side panel — click port → raw config slides in
+- UI/UX polish
+- README with screenshots
+
+**Blocked — need from senior:**
+- Cisco Catalyst 3550 credentials (IP: 192.168.99.144)
+- iLO network IP for bare metal servers
+- Ubuntu Desktop ISO
+- Windows Server Desktop Experience ISO
+- Sangfor HCI ISO + install procedure
+- RAID level used by company
+- Post-install checklist
+
+**OS Installation (architecture decided, not built):**
+- Ubuntu Desktop — autoinstall.yaml (no clicking needed)
+- Windows Server — unattend.xml (no clicking needed)
+- Sangfor HCI — unknown, need senior
+- RAID via iLO Smart Array Redfish API first
+- ISO served via HTTP from AI server
+- iLO virtual media mounting
+- Boot order → DVD → power on → OS installs → SSH configure network
+
+**Future Phase 3:**
+- Hermes as autonomous background agent
+- Telegram alerts
+- Self-healing actions
+- Docker packaging
+
+---
+
+## Lab Environment
+
+| Device | IP | Details |
+|---|---|---|
+| HarrisPlayground | 192.168.99.142 | Ubuntu 24.04, runs NexDeploy |
+| S2D-Node1 | 192.168.99.104 | HPE ProLiant DL380 Gen10, iLO5 |
+| H3C Switch | 192.168.99.5 | Netmiko hp_comware, 54 ports |
+| Cisco Catalyst 3550 | 192.168.99.144 | No credentials yet |
+| Router/Gateway | 192.168.99.1 | |
 
 ---
 
 ## Common Commands
 
 ```bash
-# Start the app
+# Start
 cd ~/diagnostic-tool && python3 app.py
 
-# Kill and restart
+# Restart
 pkill -f "python3 app.py" && sleep 1 && python3 app.py
 
-# Test iLO connection
+# Test iLO
 python3 -c "from ilo import get_all_servers_status; import json; print(json.dumps(get_all_servers_status(), indent=2))"
 
-# Test switch connection
+# Test switch
 python3 -c "from switch import get_switch_summary; import json; print(json.dumps(get_switch_summary(), indent=2))"
+
+# Test switch raw config
+python3 -c "from switch import get_port_raw_config; print(get_port_raw_config('WGE1/0/5'))"
 
 # Test topology
 python3 -c "from topology import build_topology; r = build_topology(); print(f'Nodes: {len(r[\"nodes\"])}')"
 
-# View database devices
+# View database
 python3 -c "from database import get_devices; [print(d) for d in get_devices()]"
 
 # Push to GitHub
 cd ~/diagnostic-tool && git add . && git commit -m 'update' && git push origin main
-
-# Start Hermes
-hermes
-
-# Test Hermes
-hermes chat -q "say hello"
 ```
 
 ---
 
-## Dependencies (requirements.txt)
-
-```
+## Dependencies
 fastapi
 uvicorn
 requests
@@ -302,7 +284,7 @@ python-jose[cryptography]
 python-multipart
 sqlalchemy
 jinja2
-```
+netmiko
 
 Install: `pip3 install -r requirements.txt --break-system-packages`
 
@@ -310,11 +292,15 @@ Install: `pip3 install -r requirements.txt --break-system-packages`
 
 ## Notes for Claude Code
 
-- All HTML lives in `templates/` folder as Jinja2 templates
-- All CSS lives in `static/style.css`
-- All JavaScript lives in `static/app.js`
+- All HTML in `templates/` as Jinja2 templates
+- All CSS in `static/style.css`
+- All JavaScript in `static/app.js`
 - Never put HTML inside `app.py` — routes only
 - Never hardcode IPs or credentials — always read from database
-- The `pageVersion` counter in app.js prevents wrong page content on fast navigation
-- Cache system in app.py uses threading — be careful with thread safety
-- Hermes is called via subprocess — response parsed from box characters in output
+- DeepSeek API called directly in `ask_ai()` function in app.py
+- Hermes NOT used for chatbot — only installed for future Phase 3
+- pageVersion counter in app.js prevents wrong page on fast navigation
+- Cache uses threading — be careful with thread safety
+- events.py runs as daemon thread — starts automatically with app
+- .env file stores DeepSeek config — never commit to GitHub
+- nexdeploy.db and .secret_key must travel together — different key = can't read db
