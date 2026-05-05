@@ -222,47 +222,48 @@ def ask_ai(prompt):
 
 
 def ask_hermes(message, session_id=None):
-    """Call Hermes agent and extract response text"""
-    import subprocess
+    """Call DeepSeek API directly — fast, reliable"""
     try:
-        cmd = ["hermes", "--yolo", "chat", "-q", message, "--skills", "nexdeploy-dc"]
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=60,
-            cwd=os.path.dirname(os.path.abspath(__file__))
+        # Read API key from project .env file
+        env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+        api_key = ""
+        if os.path.exists(env_path):
+            with open(env_path) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("DEEPSEEK_API_KEY"):
+                        api_key = line.split("=", 1)[-1].strip().strip('"').strip("'")
+                        break
+
+        if not api_key:
+            return "API key not configured. Add DEEPSEEK_API_KEY to .env file."
+
+        response = requests.post(
+            "https://500.tokenvisor.ai/api/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json"
+            },
+            json={
+                "model": "deepseek-ai/DeepSeek-V3.2",
+                "messages": [
+                    {"role": "user", "content": message}
+                ],
+                "max_tokens": 1000,
+                "temperature": 0.1
+            },
+            timeout=30
         )
-        output = result.stdout + result.stderr
-        
-        # Extract text between the box characters
-        lines = output.split("\n")
-        response_lines = []
-        inside_box = False
-        
-        for line in lines:
-            if "╭" in line and "✦" in line:
-                inside_box = True
-                continue
-            if "╰" in line and inside_box:
-                inside_box = False
-                break
-            if inside_box:
-                # Clean up the line
-                cleaned = line.strip()
-                if cleaned:
-                    response_lines.append(cleaned)
-        
-        if response_lines:
-            return " ".join(response_lines).strip()
-        
-        # Fallback - return anything useful
-        return "I need more specific information to help. Can you provide more details?"
-        
-    except subprocess.TimeoutExpired:
+
+        if response.status_code == 200:
+            return response.json()["choices"][0]["message"]["content"].strip()
+        else:
+            return f"API error {response.status_code}: {response.text[:200]}"
+
+    except requests.Timeout:
         return "Request timed out. Please try again."
     except Exception as e:
-        return f"Error calling Hermes: {str(e)}"
+        return f"Error: {str(e)}"
 
 def extract_ip(text):
     m = re.findall(r'\b(?:\d{1,3}\.){3}\d{1,3}\b', text)
