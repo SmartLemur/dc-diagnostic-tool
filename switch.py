@@ -320,6 +320,31 @@ def get_port_raw_config(interface, ip=None, username=None, password=None, brand=
         "device_type": device_type
     }
 
+def get_full_config(ip=None, username=None, password=None, brand=None):
+    """Fetch the full running configuration from the switch"""
+    if not ip:
+        switches = get_switches_from_db()
+        if not switches:
+            return {"error": "No switches in database"}
+        sw = switches[0]
+        ip = sw["ip"]
+        username = sw["username"]
+        password = sw["password"]
+        brand = sw.get("brand", "unknown")
+
+    device_type = get_netmiko_device_type(brand)
+    if "comware" in device_type:
+        command = "display current-configuration"
+    else:
+        command = "show running-config"
+
+    output = run_switch_command(ip, username, password, brand, command)
+
+    if output.startswith("ERROR"):
+        return {"error": output}
+
+    return output.strip()
+
 def get_port_details(interface, ip=None, username=None, password=None, brand=None):
     """Get parsed details of a specific port"""
     ports = get_port_status(ip=ip, username=username, password=password, brand=brand)

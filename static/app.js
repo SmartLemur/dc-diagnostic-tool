@@ -14,6 +14,7 @@ function navigate(page) {
   });
   document.getElementById('nav-' + page).classList.add('active');
 
+  closePortDrawer();
   var content = document.getElementById('content');
   content.innerHTML = '<div class="loading-box"><div class="spinner"></div>Loading...</div>';
 
@@ -56,7 +57,7 @@ function renderTopology(version, data) {
   var nodes = data.nodes || [];
   var ports = data.switch_ports || [];
 
-  var servers = nodes.filter(function(n) { return n.type === 'ilo' || n.type === 'server' || n.type === 'windows_server' || n.type === 'linux_server'; });
+  var servers = nodes.filter(function(n) { return n.type === 'bmc' || n.type === 'server' || n.type === 'windows_server' || n.type === 'linux_server'; });
   var switches = nodes.filter(function(n) { return n.type === 'switch' || n.type === 'h3c_switch' || n.type === 'cisco_switch'; });
   var portsUp = ports.filter(function(p) { return p.status === 'UP'; });
 
@@ -97,7 +98,7 @@ function renderTopology(version, data) {
 function renderTopologyDiagram(nodes, ports) {
   var router = nodes.find(function(n) { return n.type === 'router'; });
   var switches = nodes.filter(function(n) { return n.type.includes('switch'); });
-  var servers = nodes.filter(function(n) { return n.type === 'ilo' || n.type === 'windows_server' || n.type === 'linux_server' || n.type === 'server'; });
+  var servers = nodes.filter(function(n) { return n.type === 'bmc' || n.type === 'windows_server' || n.type === 'linux_server' || n.type === 'server'; });
   var unknown = nodes.filter(function(n) { return n.type === 'unknown'; });
   var allBottom = servers.concat(unknown);
 
@@ -149,7 +150,7 @@ function drawNode(x, y, node, color) {
 function getDeviceIcon(type) {
   if (type === 'router') return '🌐';
   if (type.includes('switch')) return '🔀';
-  if (type === 'ilo') return '🖥';
+  if (type === 'bmc') return '🖥';
   if (type === 'windows_server') return '🪟';
   if (type === 'linux_server') return '🐧';
   return '❓';
@@ -165,7 +166,7 @@ function loadServers(version) {
       var html = '';
       html += '<div class="section-header">';
       html += '<span class="section-title">Server Hardware Health</span>';
-      html += '<button class="btn btn-primary" style="margin-left:auto" onclick="showAddDevice(\'ilo\')">+ Add Server</button>';
+      html += '<button class="btn btn-primary" style="margin-left:auto" onclick="showAddDevice(\'bmc\')">+ Add Server</button>';
       html += '</div>';
       html += '<div class="server-grid">';
       var keys = Object.keys(data);
@@ -226,7 +227,7 @@ function loadSwitches(version) {
       html += '<span style="font-size:0.75rem;color:#718096;margin-left:auto">Total: ' + data.total_ports + ' ports</span>';
       html += '</div>';
       html += '<div class="card">';
-      html += '<div class="card-title">H3C Switch — 192.168.99.5</div>';
+      html += '<div class="card-title">' + (data.name || 'Switch') + (data.ip ? ' — ' + data.ip : '') + '</div>';
       html += '<div class="port-grid">';
       var allPorts = (data.up_ports || []).concat(data.down_ports || []);
       allPorts.sort(function(a, b) { return a.interface.localeCompare(b.interface); });
@@ -234,7 +235,7 @@ function loadSwitches(version) {
         var isUp = p.status === 'UP';
         var devices = p.devices || [];
         var deviceName = devices.length > 0 ? (devices[0].name || devices[0].ip || '') : '';
-        html += '<div class="port-card ' + (isUp ? 'up' : 'down') + '">';
+        html += '<div class="port-card ' + (isUp ? 'up' : 'down') + '" style="cursor:pointer" onclick="openPortDrawer(\'' + p.interface + '\')">';
         html += '<div class="port-name">' + p.interface + '</div>';
         html += '<div class="port-info">' + p.status + ' · ' + p.speed + ' · VLAN ' + p.vlan + '</div>';
         if (deviceName) html += '<div class="port-device">' + deviceName + '</div>';
@@ -430,6 +431,9 @@ function sendChat() {
   .then(function(data) {
     thinking.remove();
     addChatMsg(data.reply, 'ai');
+    if (data.action === 'show_full_config') {
+      openConfigDrawer(data.config || '');
+    }
     if (data.run_diagnostic && data.data) {
       var running = addChatMsg('Running checks... please wait', 'thinking');
       fetch('/run_diagnostic', {
@@ -449,6 +453,76 @@ function sendChat() {
     thinking.remove();
     addChatMsg('Connection error. Please try again.', 'ai');
   });
+}
+
+// ── Port Drawer ──
+var currentDrawerInterface = null;
+
+function openPortDrawer(iface) {
+  if (currentPage !== 'switches') return;
+  currentDrawerInterface = iface;
+  document.getElementById('port-drawer').classList.add('open');
+  document.getElementById('port-drawer-overlay').classList.add('open');
+  document.getElementById('port-drawer-title').textContent = iface;
+  document.getElementById('port-drawer-content').innerHTML = '<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0.5rem;color:#718096;font-size:0.82rem"><div class="spinner"></div>Loading...</div>';
+  fetch('/api/switch/port/' + iface, {credentials: 'include'})
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.error) {
+        document.getElementById('port-drawer-content').innerHTML = '<div style="color:#fc8181;padding:1rem">Error: ' + data.error + '</div>';
+        return;
+      }
+      var d = data.details || {};
+      var html = '';
+      html += '<div class="drawer-section"><div class="drawer-section-title">Port Details</div>';
+      html += '<div class="detail-grid">';
+      html += '<div class="detail-item"><div class="detail-label">Status</div><div class="detail-value" style="color:' + (d.status === 'UP' ? '#48bb78' : '#718096') + '">' + (d.status || 'Unknown') + '</div></div>';
+      html += '<div class="detail-item"><div class="detail-label">Speed</div><div class="detail-value">' + (d.speed || 'Unknown') + '</div></div>';
+      html += '<div class="detail-item"><div class="detail-label">VLAN</div><div class="detail-value">' + (d.vlan || 'Unknown') + '</div></div>';
+      html += '<div class="detail-item"><div class="detail-label">Type</div><div class="detail-value">' + (d.type || 'Unknown') + '</div></div>';
+      if (d.description) html += '<div class="detail-item" style="grid-column:span 2"><div class="detail-label">Description</div><div class="detail-value">' + d.description + '</div></div>';
+      html += '</div></div>';
+      if (data.raw_config) {
+        html += '<div class="drawer-section"><div class="drawer-section-title">Raw Config</div>';
+        html += '<pre class="drawer-raw-config">' + data.raw_config.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</pre></div>';
+      }
+      html += '<div class="drawer-section"><div class="drawer-section-title">Change VLAN</div>';
+      html += '<div style="display:flex;gap:0.5rem;align-items:center">';
+      html += '<input type="number" id="drawer-vlan-input" placeholder="VLAN ID" min="1" max="4094" style="background:#0f1117;border:1px solid #2d3748;border-radius:6px;padding:0.5rem 0.65rem;color:#e2e8f0;font-size:0.85rem;width:120px;outline:none">';
+      html += '<button class="btn btn-primary" style="font-size:0.8rem;padding:0.45rem 0.9rem" onclick="drawerChangeVlan()">Apply</button>';
+      html += '</div></div>';
+      document.getElementById('port-drawer-content').innerHTML = html;
+    })
+    .catch(function() {
+      document.getElementById('port-drawer-content').innerHTML = '<div style="color:#fc8181;padding:1rem">Connection error. Please try again.</div>';
+    });
+}
+
+function openConfigDrawer(config) {
+  document.getElementById('port-drawer').classList.add('open');
+  document.getElementById('port-drawer-overlay').classList.add('open');
+  document.getElementById('port-drawer-title').textContent = 'Full Switch Configuration';
+  var escaped = config.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  document.getElementById('port-drawer-content').innerHTML =
+    '<div class="drawer-section">' +
+    '<div class="drawer-section-title">Running Configuration</div>' +
+    '<pre class="drawer-raw-config">' + escaped + '</pre>' +
+    '</div>';
+}
+
+function closePortDrawer() {
+  document.getElementById('port-drawer').classList.remove('open');
+  document.getElementById('port-drawer-overlay').classList.remove('open');
+}
+
+function drawerChangeVlan() {
+  var vlanId = document.getElementById('drawer-vlan-input').value.trim();
+  if (!vlanId) { alert('Enter a VLAN ID'); return; }
+  var iface = currentDrawerInterface;
+  closePortDrawer();
+  var chatInput = document.getElementById('chatInput');
+  chatInput.value = 'set port ' + iface + ' to vlan ' + vlanId;
+  sendChat();
 }
 
 // ── Key bindings ──

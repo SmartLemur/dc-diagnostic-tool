@@ -85,7 +85,7 @@
       <div class="form-group">
         <label>Device Type</label>
         <select id="deviceType">
-          <option value="ilo">Server — iLO/iDRAC (HPE/Dell/H3C)</option>
+          <option value="bmc">Server — BMC (HPE/Dell/H3C)</option>
           <option value="switch">Switch (H3C/Cisco)</option>
           <option value="router">Router</option>
         </select>
@@ -108,6 +108,16 @@
       <button class="btn btn-primary" onclick="saveDevice()">Save Device</button>
     </div>
   </div>
+</div>
+
+<!-- Port Detail Drawer -->
+<div class="drawer-overlay" id="port-drawer-overlay" onclick="closePortDrawer()"></div>
+<div class="port-drawer" id="port-drawer">
+  <div class="drawer-header">
+    <span class="drawer-title" id="port-drawer-title">Port</span>
+    <button class="drawer-close" onclick="closePortDrawer()">&#10005;</button>
+  </div>
+  <div class="drawer-body" id="port-drawer-content"></div>
 </div>
 
 <script src="/static/app.js"></script>

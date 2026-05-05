@@ -2,11 +2,11 @@ from fastapi import FastAPI, Request, Form, Cookie
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-import subprocess, socket, requests, paramiko, winrm, re, os, json, sqlite3
+import subprocess, socket, requests, paramiko, winrm, os, sqlite3
 from datetime import datetime
 from auth import login, verify_session, logout
 from database import get_devices, log_action, init_db, add_device, decrypt_password
-from ilo import get_all_servers_status, get_server_info
+from bmc import get_all_servers_status, get_server_info
 
 app = FastAPI()
 
@@ -206,21 +206,6 @@ def run_diagnostic(ip, gw, dns, user, pw):
     else: details = {"accessible": False, "error": "OS unknown"}
     return results, conflict, conflict_info, os_type, details
 
-def ask_ai(prompt):
-    try:
-        r = requests.post(OLLAMA_URL, json={
-            "model": MODEL,
-            "messages": [{"role":"user","content":prompt}],
-            "stream": False, "think": False,
-            "options": {"temperature":0.1,"num_predict":500,"num_ctx":4096}
-        }, timeout=120)
-        if r.status_code == 200:
-            return r.json().get("message",{}).get("content","").strip() or "No response"
-        return f"API error {r.status_code}"
-    except Exception as e:
-        return f"Error: {e}"
-
-
 def ask_ai(message, session_id=None):
     """Call DeepSeek API directly — reads config from .env"""
     try:
@@ -363,7 +348,10 @@ async def api_switch(session_token: str = Cookie(None)):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 @app.get("/api/switch/port/{interface:path}")
-async def api_port_config(interface: str):
+async def api_port_config(interface: str, session_token: str = Cookie(None)):
+    user = get_user(session_token)
+    if not user:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
     try:
         from switch import get_port_raw_config, get_port_details
         raw = get_port_raw_config(interface)
@@ -515,7 +503,7 @@ async def chat(request: Request, session_token: str = Cookie(None)):
             server_key = pending.get("server_key")
             action = pending.get("action")
             try:
-                from ilo import power_action
+                from bmc import power_action
                 result = power_action(server_key, action)
                 session["pending_action"] = None
                 if result.get("success"):
@@ -533,6 +521,21 @@ async def chat(request: Request, session_token: str = Cookie(None)):
         session["pending_action"] = None
         return JSONResponse({"reply": "Action cancelled. No changes were made.", "step": "idle"})
 
+    # ── Detect full switch config request ──
+    full_config_keywords = [
+        "show switch config", "show full config", "display running config",
+        "show me the switch config", "full switch configuration",
+        "show running config", "display current configuration", "full config"
+    ]
+    if any(kw in msg.lower() for kw in full_config_keywords):
+        try:
+            from switch import get_full_config
+            config = get_full_config()
+            if isinstance(config, dict) and "error" in config:
+                return JSONResponse({"reply": f"Error fetching switch config: {config['error']}", "step": "idle"})
+            return JSONResponse({"reply": "Here is the full switch configuration.", "action": "show_full_config", "config": config, "step": "idle"})
+        except Exception as e:
+            return JSONResponse({"reply": f"Error: {str(e)}", "step": "idle"})
 
 # ── Detect port info request ──
     import re as re_mod
@@ -623,8 +626,8 @@ async def chat(request: Request, session_token: str = Cookie(None)):
         action = action_map.get(action_word, "GracefulRestart")
 
         try:
-            from ilo import get_ilo_servers
-            servers = get_ilo_servers()
+            from bmc import get_bmc_servers
+            servers = get_bmc_servers()
             server_key = None
             server_display_name = server_name
 

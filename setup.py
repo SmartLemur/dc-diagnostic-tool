@@ -143,7 +143,7 @@ The project is located at: {PROJECT_DIR}
 
 ### 1. Check Server Health
 ```bash
-cd {PROJECT_DIR} && python3 -c "from ilo import get_all_servers_status; import json; print(json.dumps(get_all_servers_status(), indent=2))"
+cd {PROJECT_DIR} && python3 -c "from bmc import get_all_servers_status; import json; print(json.dumps(get_all_servers_status(), indent=2))"
 ```
 
 ### 2. Check Switch Port Status
@@ -194,7 +194,7 @@ conn.close()
 ### 7. Power Control — REQUIRES APPROVAL
 Always ask engineer to confirm before executing.
 ```bash
-cd {PROJECT_DIR} && python3 -c "from ilo import power_action; print(power_action('server1', 'ACTION'))"
+cd {PROJECT_DIR} && python3 -c "from bmc import power_action; print(power_action('server1', 'ACTION'))"
 ```
 Allowed: On, ForceOff, GracefulShutdown, GracefulRestart
 

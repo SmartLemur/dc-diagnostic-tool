@@ -182,7 +182,7 @@ if __name__ == "__main__":
         print("\nAdding lab devices...")
         add_device(
             name="S2D-Node1",
-            device_type="ilo",
+            device_type="bmc",
             ip="192.168.99.104",
             username="cdfadmin",
             password="QweAsd!23cdf",
@@ -191,7 +191,7 @@ if __name__ == "__main__":
         )
         add_device(
             name="Server 2",
-            device_type="ilo",
+            device_type="bmc",
             ip="192.168.99.102",
             username="cdfadmin",
             password="QweAsd!23cdf",

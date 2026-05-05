@@ -38,7 +38,7 @@ def classify_device(ip):
     open_ports = []
 
     port_checks = {
-        443: "ilo_idrac",
+        443: "bmc_idrac",
         22: "ssh",
         5985: "winrm",
         80: "http",
@@ -58,8 +58,8 @@ def classify_device(ip):
             pass
 
     # Classify based on open ports
-    if "ilo_idrac" in open_ports:
-        device_type = "ilo"
+    if "bmc_idrac" in open_ports:
+        device_type = "bmc"
     elif "winrm" in open_ports:
         device_type = "windows_server"
     elif "ssh" in open_ports and "snmp" not in open_ports:
@@ -74,11 +74,11 @@ def classify_device(ip):
         "open_ports": open_ports
     }
 
-def identify_ilo(ip):
-    """Get server details from iLO Redfish API — tries database credentials first"""
+def identify_bmc(ip):
+    """Get server details from BMC Redfish API — tries database credentials first"""
     try:
         from database import get_devices
-        db_devices = get_devices(device_type="ilo")
+        db_devices = get_devices(device_type="bmc")
         db_creds = [(d["username"], d["password"]) for d in db_devices]
     except:
         db_creds = []
@@ -215,12 +215,12 @@ def discover_network():
         print(f"  Type: {device_type} | Ports: {classification['open_ports']}")
         print(f"Step 3: Identifying {ip}...")
 
-        if device_type == "ilo":
-            ilo_info = identify_ilo(ip)
+        if device_type == "bmc":
+            ilo_info = identify_bmc(ip)
             if ilo_info["identified"]:
                 result["name"] = ilo_info["name"]
                 result["brand"] = ilo_info["brand"]
-                result["type"] = "ilo"
+                result["type"] = "bmc"
                 result["details"] = ilo_info
                 print(f"  Identified as: {ilo_info['name']} ({ilo_info['brand']})")
 
