@@ -22,6 +22,9 @@ python3 setup.py
 
 # Start the app
 python3 app.py
+
+# Restart
+pkill -f "python3 app.py" && sleep 1 && python3 app.py
 ```
 
 Access at: `http://<server-ip>:8000`
@@ -31,38 +34,38 @@ Default login: `admin` / `admin123`
 
 ## File Structure
 diagnostic-tool/
-├── app.py              ← FastAPI routes, DeepSeek API call, chat logic
-├── ilo.py              ← HPE/Dell/H3C server BMC via Redfish (dynamic from DB)
-├── switch.py           ← Netmiko switch integration (80+ brands, dynamic from DB)
-├── topology.py         ← Network topology builder
-├── discovery.py        ← ARP scan + device classification
-├── database.py         ← SQLite + Fernet encryption
-├── auth.py             ← Login + session management
-├── events.py           ← Real time event detection background thread
-├── setup.py            ← First time setup wizard — run once on new machine
-├── CLAUDE.md           ← This file
+├── app.py          ← FastAPI routes, DeepSeek API call, chat logic
+├── bmc.py          ← BMC server management via Redfish (HPE iLO, Dell iDRAC, H3C HDM, any Redfish-compliant brand)
+├── switch.py       ← Netmiko switch integration (80+ brands, dynamic from DB)
+├── topology.py     ← Network topology builder
+├── discovery.py    ← ARP scan + device classification
+├── database.py     ← SQLite + Fernet encryption
+├── auth.py         ← Login + session management
+├── events.py       ← Real time event detection background thread
+├── setup.py        ← First time setup wizard — run once on new machine
+├── CLAUDE.md       ← This file
 ├── static/
-│   ├── style.css       ← All CSS
-│   └── app.js          ← All JavaScript
+│   ├── style.css   ← All CSS
+│   └── app.js      ← All JavaScript
 ├── templates/
-│   ├── base.html       ← Main layout — sidebar + content + chatbot
-│   ├── login.html      ← Login page
-│   └── report.html     ← Full diagnostic report page
-├── .env                ← DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL (NOT in GitHub)
-├── nexdeploy.db        ← SQLite database (NOT in GitHub)
-└── .secret_key         ← Fernet encryption key (NOT in GitHub)
+│   ├── base.html   ← Main layout — sidebar + content + chatbot + port drawer
+│   ├── login.html  ← Login page
+│   └── report.html ← Full diagnostic report page
+├── .env            ← DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL (NOT in GitHub)
+├── nexdeploy.db    ← SQLite database (NOT in GitHub)
+└── .secret_key     ← Fernet encryption key (NOT in GitHub)
 
 ---
 
 ## Tech Stack
 
 | Layer | Technology |
-|---|---|
+|-------|------------|
 | Backend | Python 3.12, FastAPI, Uvicorn |
 | Frontend | Vanilla HTML, CSS, JavaScript — no frameworks |
 | Templates | Jinja2 |
 | AI Chatbot | Direct DeepSeek V3.2 API via requests library |
-| Server mgmt | Redfish REST API (HPE iLO, Dell iDRAC, H3C HDM) |
+| Server mgmt | Redfish REST API — brand agnostic (HPE, Dell, Lenovo, Supermicro, H3C, any Redfish-compliant BMC) |
 | Switch mgmt | Netmiko — 80+ switch brands supported |
 | Linux access | paramiko SSH |
 | Windows access | pywinrm WinRM |
@@ -78,9 +81,6 @@ Web chatbot → Direct DeepSeek V3.2 API (1-3 second responses)
 Live system data injected as context before each message
 Conversation history stored per session
 Handles confirmation flow for dangerous actions
-Hermes Agent → Installed but NOT used for chatbot
-Kept for future Phase 3 autonomous background agent
-nexdeploy-dc skill written at ~/.hermes/skills/nexdeploy/nexdeploy-dc/SKILL.md
 
 DeepSeek config stored in `.env`:
 DEEPSEEK_API_KEY=your_key
@@ -90,26 +90,34 @@ DEEPSEEK_MODEL=deepseek-ai/DeepSeek-V3.2
 ---
 
 ## Database Structure
+users       (id, username, password_hash, role, created_at)
+devices     (id, name, type, ip, username, password_encrypted, brand, model, added_by, created_at)
+audit_log   (id, username, action, details, timestamp)
+sessions    (id, username, token, expires_at, created_at)
 
-```sql
-users (id, username, password_hash, role, created_at)
-devices (id, name, type, ip, username, password_encrypted, brand, model, added_by, created_at)
-audit_log (id, username, action, details, timestamp)
-sessions (id, username, token, expires_at, created_at)
+Device types: `bmc`, `switch`, `router`
+NOTE: type is `bmc` not `ilo` — this was renamed. If DB rows still say `ilo` run:
+```bash
+python3 -c "
+import sqlite3
+conn = sqlite3.connect('/home/harris/diagnostic-tool/nexdeploy.db')
+conn.execute(\"UPDATE devices SET type='bmc' WHERE type='ilo'\")
+conn.commit()
+conn.close()
+print('Done')
+"
 ```
-
-Device types: `ilo`, `switch`, `router`
 
 ---
 
 ## API Endpoints
 
 | Method | Endpoint | What it does |
-|---|---|---|
+|--------|----------|--------------|
 | GET | `/` | Main dashboard |
 | GET/POST | `/login` | Login page / authenticate |
 | GET | `/logout` | Clear session |
-| GET | `/api/servers` | Live iLO health data |
+| GET | `/api/servers` | Live BMC health data |
 | GET | `/api/switch` | Switch port status |
 | GET | `/api/switch/port/{interface}` | Raw config for specific port |
 | GET | `/api/topology` | Full network topology |
@@ -126,35 +134,27 @@ Device types: `ilo`, `switch`, `router`
 
 ## Key Architecture Decisions
 
-**Fully dynamic — no hardcoded IPs or credentials:**
-Everything reads from SQLite database. Anyone clones repo, runs setup.py, adds their devices, system works with their infrastructure.
+**Fully dynamic — no hardcoded IPs or credentials:** Everything reads from SQLite database. Anyone clones repo, runs setup.py, adds their devices, system works with their infrastructure.
 
-**Brand-agnostic servers:**
-ilo.py uses Redfish API — same standard for HPE, Dell, H3C. Auto-detects brand from Manufacturer field.
+**Brand-agnostic servers via Redfish:** bmc.py dynamically discovers the correct Redfish paths by calling `/redfish/v1/Systems/`, `/redfish/v1/Chassis/`, `/redfish/v1/Managers/` and reading `Members[0]["@odata.id"]` — works for HPE (path: `/redfish/v1/Systems/1`), Dell (path: `/redfish/v1/Systems/System.Embedded.1`), and any other Redfish-compliant brand automatically.
 
-**Brand-agnostic switches:**
-switch.py uses Netmiko — 80+ switch brands. Brand detected from SSH banner. Correct commands selected automatically via SWITCH_COMMANDS dict and BRAND_TO_NETMIKO mapping.
+**Brand-agnostic switches:** switch.py uses Netmiko — 80+ switch brands. Brand detected from SSH banner. Correct commands selected automatically via SWITCH_COMMANDS dict.
 
-**Caching system:**
-iLO and switch data cached in memory. Cache warms on startup. Pages load instantly. Refreshes every 60 seconds staggered.
+**Caching system:** BMC and switch data cached in memory. Cache warms on startup. Pages load instantly. Refreshes every 60 seconds staggered.
 
-**Chat confirmation flow:**
-Dangerous actions (port config, power control) handled by FastAPI session — not AI.
-Engineer types action → system asks confirm → engineer types yes → Python executes directly.
+**Chat confirmation flow:** Dangerous actions (port config, power control) handled by FastAPI session — not AI. Engineer types action → system asks confirm → engineer types yes → Python executes directly.
 
-**Real time event detection:**
-events.py runs as background thread. Compares current vs previous state every 30 seconds.
-Detects: port up/down, server power changes, server health changes, new devices on network.
+**Real time event detection:** events.py runs as background thread. Compares current vs previous state every 30 seconds.
 
 ---
 
 ## Dashboard Pages
 
-**Topology** — visual network diagram, auto-generated from ARP + MAC + database
-**Servers** — iLO health cards, power state, health badges
-**Switches** — port grid, click port for raw config (side panel — in progress)
-**Event Log** — real time feed from audit_log
-**Settings** — add/delete devices, change password
+- **Topology** — visual network diagram, auto-generated from ARP + MAC + database
+- **Servers** — BMC health cards, power state, health badges
+- **Switches** — port grid, click any port → side drawer with raw config + VLAN change
+- **Event Log** — real time feed from audit_log
+- **Settings** — add/delete devices, change password
 
 ---
 
@@ -166,6 +166,7 @@ Engineer can ask:
 - Network topology
 - Run diagnostic on specific IP
 - Recent events
+- `show full config` / `show switch config` → opens full running config in side drawer
 
 Engineer can command (with approval gate):
 - Set port X to VLAN Y
@@ -178,8 +179,8 @@ Engineer can command (with approval gate):
 
 - Login system with bcrypt + session tokens
 - Dashboard with 5 navigation pages
-- Live iLO server health via Redfish API
-- H3C switch via Netmiko (54 ports, 6 UP detected)
+- Live BMC server health via Redfish API (brand-agnostic, dynamic path discovery)
+- H3C switch via Netmiko (54 ports, UP/DOWN detection)
 - Real time event detection (events.py)
 - Direct DeepSeek API chatbot (1-3 second responses)
 - Switch port config via chatbot with approval gate
@@ -189,20 +190,21 @@ Engineer can command (with approval gate):
 - Audit logging + event log page
 - Add/delete devices from Settings
 - Caching system
-- Page version control (no wrong content on fast nav)
 - setup.py — fully portable
 - Netmiko — 80+ switch brands
-- Switch raw config API endpoint /api/switch/port/{interface}
+- Switch port side drawer — click any port → raw config + VLAN change
+- Full switch running config via chatbot → renders in side drawer
+- Dynamic Redfish path discovery — works with any Redfish-compliant server brand
 
 ---
 
 ## What's Not Done Yet
 
-**Immediate (no blockers):**
-- Fix switch raw config 401 cookie issue
-- Switch side panel — click port → raw config slides in
-- UI/UX polish
-- README with screenshots
+**Immediate:**
+- Full config drawer raw config box needs vertical scroll (currently clipped)
+- Add visible button on Switches page to trigger full config (engineers shouldn't have to know the chat command)
+- Delete old ilo.py from disk: `rm ~/diagnostic-tool/ilo.py`
+- README with screenshots and demo GIF
 
 **Blocked — need from senior:**
 - Cisco Catalyst 3550 credentials (IP: 192.168.99.144)
@@ -214,12 +216,12 @@ Engineer can command (with approval gate):
 - Post-install checklist
 
 **OS Installation (architecture decided, not built):**
-- Ubuntu Desktop — autoinstall.yaml (no clicking needed)
-- Windows Server — unattend.xml (no clicking needed)
+- Ubuntu Desktop — autoinstall.yaml
+- Windows Server — unattend.xml
 - Sangfor HCI — unknown, need senior
-- RAID via iLO Smart Array Redfish API first
+- RAID via BMC Smart Array Redfish API first
 - ISO served via HTTP from AI server
-- iLO virtual media mounting
+- BMC virtual media mounting
 - Boot order → DVD → power on → OS installs → SSH configure network
 
 **Future Phase 3:**
@@ -233,7 +235,7 @@ Engineer can command (with approval gate):
 ## Lab Environment
 
 | Device | IP | Details |
-|---|---|---|
+|--------|----|---------|
 | HarrisPlayground | 192.168.99.142 | Ubuntu 24.04, runs NexDeploy |
 | S2D-Node1 | 192.168.99.104 | HPE ProLiant DL380 Gen10, iLO5 |
 | H3C Switch | 192.168.99.5 | Netmiko hp_comware, 54 ports |
@@ -251,8 +253,8 @@ cd ~/diagnostic-tool && python3 app.py
 # Restart
 pkill -f "python3 app.py" && sleep 1 && python3 app.py
 
-# Test iLO
-python3 -c "from ilo import get_all_servers_status; import json; print(json.dumps(get_all_servers_status(), indent=2))"
+# Test BMC
+python3 -c "from bmc import get_all_servers_status; import json; print(json.dumps(get_all_servers_status(), indent=2))"
 
 # Test switch
 python3 -c "from switch import get_switch_summary; import json; print(json.dumps(get_switch_summary(), indent=2))"
@@ -260,11 +262,17 @@ python3 -c "from switch import get_switch_summary; import json; print(json.dumps
 # Test switch raw config
 python3 -c "from switch import get_port_raw_config; print(get_port_raw_config('WGE1/0/5'))"
 
+# Test full switch config
+python3 -c "from switch import get_full_config; print(get_full_config())"
+
 # Test topology
 python3 -c "from topology import build_topology; r = build_topology(); print(f'Nodes: {len(r[\"nodes\"])}')"
 
 # View database
 python3 -c "from database import get_devices; [print(d) for d in get_devices()]"
+
+# Fix ilo→bmc in DB if needed
+python3 -c "import sqlite3; conn = sqlite3.connect('/home/harris/diagnostic-tool/nexdeploy.db'); conn.execute(\"UPDATE devices SET type='bmc' WHERE type='ilo'\"); conn.commit(); conn.close(); print('Done')"
 
 # Push to GitHub
 cd ~/diagnostic-tool && git add . && git commit -m 'update' && git push origin main
@@ -297,6 +305,7 @@ Install: `pip3 install -r requirements.txt --break-system-packages`
 - All JavaScript in `static/app.js`
 - Never put HTML inside `app.py` — routes only
 - Never hardcode IPs or credentials — always read from database
+- Device type is `bmc` not `ilo` — was renamed, do not use `ilo` anywhere
 - DeepSeek API called directly in `ask_ai()` function in app.py
 - Hermes NOT used for chatbot — only installed for future Phase 3
 - pageVersion counter in app.js prevents wrong page on fast navigation
@@ -304,3 +313,5 @@ Install: `pip3 install -r requirements.txt --break-system-packages`
 - events.py runs as daemon thread — starts automatically with app
 - .env file stores DeepSeek config — never commit to GitHub
 - nexdeploy.db and .secret_key must travel together — different key = can't read db
+- bmc.py uses dynamic Redfish path discovery — do not hardcode /redfish/v1/Systems/1
+- Port drawer in base.html is reused for both port details and full switch config
