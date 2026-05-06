@@ -701,8 +701,9 @@ body {
   font-family: 'Courier New', Courier, monospace;
   color: #e2e8f0;
   overflow-x: auto;
-  max-height: 200px;
+  max-height: 400px;
   overflow-y: auto;
   white-space: pre;
+  word-break: normal;
   line-height: 1.5;
 }
