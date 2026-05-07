@@ -215,7 +215,8 @@ function loadSwitches(version) {
       var html = '';
       html += '<div class="section-header">';
       html += '<span class="section-title">Switch Port Status</span>';
-      html += '<button class="btn btn-primary" style="margin-left:auto" onclick="showAddDevice(\'switch\')">+ Add Switch</button>';
+      html += '<button class="btn btn-outline" style="margin-left:auto" onclick="document.getElementById(\'chatInput\').value=\'show full config\';sendChat()">Full Switch Config</button>';
+      html += '<button class="btn btn-primary" onclick="showAddDevice(\'switch\')">+ Add Switch</button>';
       html += '</div>';
       if (data.error) {
         setContent(version, html + '<div class="loading-box">Error: ' + data.error + '</div>');
@@ -525,10 +526,31 @@ function drawerChangeVlan() {
   sendChat();
 }
 
+// ── Chat history restore ──
+var chatHistoryLoaded = false;
+
+function loadChatHistory() {
+  if (chatHistoryLoaded) return;
+  chatHistoryLoaded = true;
+  fetch('/api/session/history', {credentials: 'include'})
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      var history = data.history || [];
+      history.forEach(function(item) {
+        if (item.user) addChatMsg(item.user, 'user');
+        if (item.reply) addChatMsg(item.reply, 'ai');
+      });
+    })
+    .catch(function() {});
+}
+
 // ── Key bindings ──
 document.addEventListener('keydown', function(e) {
   if (e.target.id === 'chatInput' && e.key === 'Enter') sendChat();
 });
+
+// Load chat history once on page load
+loadChatHistory();
 
 // ── Auto refresh — only refreshes current page ──
 setInterval(function() {

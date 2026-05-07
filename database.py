@@ -1,5 +1,6 @@
 import sqlite3
 import os
+import json
 import bcrypt
 from cryptography.fernet import Fernet
 from datetime import datetime
@@ -79,9 +80,110 @@ def init_db():
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )""")
 
+    # Add session_data column to existing DBs that predate this migration
+    try:
+        c.execute("ALTER TABLE sessions ADD COLUMN session_data TEXT")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass  # column already exists
+
     conn.commit()
     conn.close()
+    init_system_memory()
     print("Database initialized successfully")
+
+_SESSION_DEFAULT = lambda: {"history": [], "pending_action": None, "step": "idle", "memory_shown": False}
+
+
+def save_session(token: str, data: dict):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    json_data = json.dumps(data)
+    c.execute("UPDATE sessions SET session_data = ? WHERE token = ?", (json_data, token))
+    if c.rowcount == 0:
+        c.execute("INSERT INTO sessions (token, session_data) VALUES (?, ?)", (token, json_data))
+    conn.commit()
+    conn.close()
+
+
+def load_session(token: str) -> dict:
+    if not token:
+        return _SESSION_DEFAULT()
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT session_data FROM sessions WHERE token = ?", (token,))
+        row = c.fetchone()
+        conn.close()
+        if row and row[0]:
+            return json.loads(row[0])
+    except Exception:
+        pass
+    return _SESSION_DEFAULT()
+
+
+def clear_session_data(token: str):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("UPDATE sessions SET session_data = NULL WHERE token = ?", (token,))
+    conn.commit()
+    conn.close()
+
+
+def init_system_memory():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("""
+        CREATE TABLE IF NOT EXISTS system_memory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category TEXT NOT NULL,
+            device_name TEXT,
+            summary TEXT NOT NULL,
+            timestamp TEXT DEFAULT (datetime('now')),
+            triggered_by TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+
+def save_memory(category, summary, device_name=None, triggered_by=None):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(
+        "INSERT INTO system_memory (category, device_name, summary, triggered_by) VALUES (?,?,?,?)",
+        (category, device_name, summary, triggered_by)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_recent_memories(limit=10):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    rows = c.execute(
+        "SELECT category, device_name, summary, timestamp, triggered_by "
+        "FROM system_memory ORDER BY id DESC LIMIT ?",
+        (limit,)
+    ).fetchall()
+    conn.close()
+    return [
+        {"category": r[0], "device_name": r[1], "summary": r[2], "timestamp": r[3], "triggered_by": r[4]}
+        for r in rows
+    ]
+
+
+def get_memory_count():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    try:
+        row = c.execute("SELECT COUNT(*) FROM system_memory").fetchone()
+        conn.close()
+        return row[0] if row else 0
+    except Exception:
+        conn.close()
+        return 0
+
 
 def create_user(username: str, password: str, role: str = "engineer"):
     conn = sqlite3.connect(DB_PATH)

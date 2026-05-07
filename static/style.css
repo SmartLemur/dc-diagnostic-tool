@@ -633,7 +633,8 @@ body {
   position: fixed;
   top: 0;
   right: 0;
-  width: 400px;
+  width: 420px;
+  min-width: 420px;
   height: 100vh;
   background: #1a1d2e;
   border-left: 1px solid #2d3748;

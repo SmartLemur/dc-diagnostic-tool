@@ -5,7 +5,9 @@ from fastapi.templating import Jinja2Templates
 import subprocess, socket, requests, paramiko, winrm, os, sqlite3
 from datetime import datetime
 from auth import login, verify_session, logout
-from database import get_devices, log_action, init_db, add_device, decrypt_password
+from database import get_devices, log_action, init_db, add_device, decrypt_password, save_session, load_session, clear_session_data
+from agents.intent_classifier import IntentClassifier
+from agents.agent_router import AgentRouter
 from bmc import get_all_servers_status, get_server_info
 
 app = FastAPI()
@@ -15,7 +17,6 @@ templates = Jinja2Templates(directory="templates")
 
 OLLAMA_URL = "http://localhost:11434/api/chat"
 MODEL = "gemma4:26b"
-sessions = {}
 
 init_db()
 
@@ -311,6 +312,7 @@ async def do_login(username: str = Form(...), password: str = Form(...)):
 @app.get("/logout")
 async def do_logout(session_token: str = Cookie(None)):
     if session_token:
+        clear_session_data(session_token)
         logout(session_token)
     response = RedirectResponse("/login", status_code=302)
     response.delete_cookie("session_token")
@@ -380,6 +382,14 @@ async def api_topology(session_token: str = Cookie(None)):
         return JSONResponse(data)
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+@app.get("/api/session/history")
+async def get_session_history(session_token: str = Cookie(None)):
+    user = get_user(session_token)
+    if not user:
+        return JSONResponse({"history": []})
+    session = load_session(session_token)
+    return JSONResponse({"history": session.get("history", [])})
 
 @app.get("/api/events")
 async def api_events(session_token: str = Cookie(None)):
@@ -459,18 +469,61 @@ async def api_change_password(request: Request, session_token: str = Cookie(None
     except Exception as e:
         return JSONResponse({"error": str(e), "success": False})
 
+def is_action_request(message, device_names):
+    """
+    Pure Python check — no LLM. Instant.
+    Returns True if message looks like a hardware action.
+    Returns False if message looks like conversation.
+    """
+    msg_lower = message.lower().strip()
+
+    ACTION_SIGNALS = [
+        # Switch actions
+        "set port", "configure port", "change vlan", "show config",
+        "show port", "full config", "trunk", "access vlan", "vlan",
+        "show switch", "port config", "interface", "show running",
+        "display", "lacp", "stp", "spanning tree",
+        # Server actions
+        "restart server", "reboot", "power on", "power off", "shutdown",
+        "server health", "show server", "bmc", "ilo", "idrac", "redfish",
+        "server status", "hardware health", "temperature", "fan",
+        # Diagnostic
+        "check ", "ping ", "diagnostic", "troubleshoot", "unreachable",
+        "cannot connect", "not responding", "down", "offline",
+        # OS deployment
+        "deploy", "install os", "install ubuntu", "install windows",
+        "install sangfor", "raid", "boot order", "iso",
+        # General hardware queries
+        "how many switches", "how many servers", "list devices",
+        "show devices", "what devices", "show topology",
+        "event log", "audit log", "recent events",
+        # Additional signals for unusual phrasing
+        "configure", "config ", "i want you to", "change port",
+        "from vlan", "to vlan", "wge", "hge", "ge1/", "eth",
+        "port link", "access port", "trunk port",
+        "trunk mode", "trunk permit", "link-type", "port trunk",
+        "allow vlan", "permit vlan", "trunk vlan",
+    ]
+
+    for signal in ACTION_SIGNALS:
+        if signal in msg_lower:
+            return True
+
+    for name in device_names:
+        if name.lower() in msg_lower:
+            return True
+
+    return False
+
+
 @app.post("/chat")
 async def chat(request: Request, session_token: str = Cookie(None)):
     user = get_user(session_token)
     if not user:
         return JSONResponse({"error": "Unauthorized"}, status_code=401)
     data = await request.json()
-    sid = data.get("session_id", user)
     msg = data.get("message", "").strip()
-    if sid not in sessions:
-        sessions[sid] = {"step": "idle", "data": {}, "history": []}
-
-    session = sessions[sid]
+    session = load_session(session_token)
     pending = session.get("pending_action")
 
     # ── Handle confirmation for pending actions ──
@@ -497,6 +550,7 @@ async def chat(request: Request, session_token: str = Cookie(None)):
             except Exception as e:
                 session["pending_action"] = None
                 reply = f"Error executing switch config: {str(e)}"
+            save_session(session_token, session)
             return JSONResponse({"reply": reply, "step": "idle"})
 
         elif action_type == "power_action":
@@ -514,213 +568,137 @@ async def chat(request: Request, session_token: str = Cookie(None)):
             except Exception as e:
                 session["pending_action"] = None
                 reply = f"Error: {str(e)}"
+            save_session(session_token, session)
             return JSONResponse({"reply": reply, "step": "idle"})
+
+        elif action_type == "switch_llm_exec":
+            commands = pending.get("commands", [])
+            device_info = pending.get("device", {})
+            device_name_pending = device_info.get("name")
+            device_ip_pending = device_info.get("ip")
+
+            # pending_action has no password — re-fetch from DB
+            all_switches = get_devices(device_type="switch")
+            full_device = None
+            for d in all_switches:
+                if d["name"] == device_name_pending or d["ip"] == device_ip_pending:
+                    full_device = d
+                    break
+
+            if not full_device:
+                session["pending_action"] = None
+                save_session(session_token, session)
+                return JSONResponse({"reply": f"Device '{device_name_pending}' not found in database.", "step": "idle"})
+
+            try:
+                from switch import connect_switch, get_netmiko_device_type
+                from netmiko import NetmikoTimeoutException, NetmikoAuthenticationException
+
+                brand = full_device.get("brand", "unknown")
+                netmiko_type = get_netmiko_device_type(brand)
+                conn = connect_switch(full_device["ip"], full_device["username"], full_device["password"], brand)
+                try:
+                    output = conn.send_config_set(commands)
+                    # Extract interface from commands for targeted verification
+                    interface_for_verify = None
+                    for cmd in commands:
+                        if cmd.strip().lower().startswith("interface "):
+                            interface_for_verify = cmd.strip().split(" ", 1)[1]
+                            break
+                    if interface_for_verify:
+                        verify_cmd = (
+                            f"display current-configuration interface {interface_for_verify}"
+                            if "comware" in netmiko_type
+                            else f"show running-config interface {interface_for_verify}"
+                        )
+                        verification = conn.send_command(verify_cmd, read_timeout=15)
+                    else:
+                        verification = ""
+                finally:
+                    conn.disconnect()
+
+                session["pending_action"] = None
+                cmd_preview = "\n".join(commands)
+                reply = f"Commands executed on **{full_device['name']}**.\n\nCommands sent:\n{cmd_preview}\n\nOutput:\n{output}"
+                if verification:
+                    reply += f"\n\nVerification:\n{verification}"
+                log_action(user, "SWITCH_LLM_EXEC", f"LLM commands on {full_device['name']}")
+                try:
+                    from memory import record_action
+                    device_name = pending.get("device", {}).get("name", "unknown switch")
+                    record_action(
+                        category="switch_config",
+                        summary=f"Executed commands on {device_name}: {', '.join(pending.get('commands', [])[:2])}",
+                        device_name=device_name,
+                        triggered_by=user
+                    )
+                except Exception:
+                    pass
+                save_session(session_token, session)
+                return JSONResponse({"reply": reply, "step": "idle"})
+
+            except NetmikoAuthenticationException:
+                session["pending_action"] = None
+                save_session(session_token, session)
+                return JSONResponse({"reply": f"Authentication failed for {full_device['name']}. Check credentials.", "step": "idle"})
+            except NetmikoTimeoutException:
+                session["pending_action"] = None
+                save_session(session_token, session)
+                return JSONResponse({"reply": f"Connection timed out to {full_device['name']}.", "step": "idle"})
+            except Exception as e:
+                session["pending_action"] = None
+                save_session(session_token, session)
+                return JSONResponse({"reply": f"Error executing commands on {full_device['name']}: {e}", "step": "idle"})
 
     # ── Handle cancellation ──
     if pending and msg.lower() in ["no", "cancel", "n", "abort"]:
         session["pending_action"] = None
+        save_session(session_token, session)
         return JSONResponse({"reply": "Action cancelled. No changes were made.", "step": "idle"})
 
-    # ── Detect full switch config request ──
-    full_config_keywords = [
-        "show switch config", "show full config", "display running config",
-        "show me the switch config", "full switch configuration",
-        "show running config", "display current configuration", "full config"
-    ]
-    if any(kw in msg.lower() for kw in full_config_keywords):
-        try:
-            from switch import get_full_config
-            config = get_full_config()
-            if isinstance(config, dict) and "error" in config:
-                return JSONResponse({"reply": f"Error fetching switch config: {config['error']}", "step": "idle"})
-            return JSONResponse({"reply": "Here is the full switch configuration.", "action": "show_full_config", "config": config, "step": "idle"})
-        except Exception as e:
-            return JSONResponse({"reply": f"Error: {str(e)}", "step": "idle"})
+    # ── Two-gate pipeline ──
+    devices = get_devices()
+    device_names = [d["name"] for d in devices]
 
-# ── Detect port info request ──
-    import re as re_mod
-    port_info_match = re_mod.search(
-        r'(?:show|display|get|check|what is)\s+(?:config|configuration|info|details|status).*?(?:port|interface)\s+([\w\/]+)',
-        msg.lower()
-    ) or re_mod.search(
-        r'(?:port|interface)\s+([\w\/]+).*?(?:config|configuration|info|details|status)',
-        msg.lower()
-    )
+    if is_action_request(msg, device_names):
+        # Gate 1 — hardware action: classify then route
+        classifier = IntentClassifier()
+        intent = classifier.classify(msg, devices)
 
-    if port_info_match:
-        interface = port_info_match.group(1).upper()
-        try:
-            from switch import get_port_details
-            port = get_port_details(interface)
-            reply = f"Current configuration for {interface}:\nStatus: {port.get('status', 'Unknown')}\nSpeed: {port.get('speed', 'Unknown')}\nVLAN: {port.get('vlan', 'Unknown')}\nType: {port.get('type', 'Unknown')}"
-            if port.get('description'):
-                reply += f"\nDescription: {port.get('description')}"
-            return JSONResponse({"reply": reply, "step": "idle"})
-        except Exception as e:
-            return JSONResponse({"reply": f"Error getting port info: {str(e)}", "step": "idle"})
-    # ── Detect switch port configuration request ──
-    import re as re_mod
-    port_vlan_match = re_mod.search(
-        r'(?:set|change|configure|assign)\s+port\s+([\w\/]+)\s+(?:to\s+)?vlan\s+(\d+)',
-        msg.lower()
-    )
-
-    if port_vlan_match:
-        interface_raw = port_vlan_match.group(1).upper()
-        vlan_id = int(port_vlan_match.group(2))
-
-        # Normalize interface name
-        interface = interface_raw
-        if not any(x in interface for x in ['WGE', 'HGE', 'GE', 'XGE']):
-            interface = f"WGE1/0/{interface_raw}"
-
-        try:
-            from switch import get_port_details, get_vlans
-            port_info = get_port_details(interface)
-            available_vlans = get_vlans()
-
-            current_status = port_info.get("status", "Unknown")
-            current_vlan = port_info.get("vlan", "Unknown")
-            current_speed = port_info.get("speed", "Unknown")
-
-            warning = ""
-            if current_status == "UP":
-                warning = f"\nWARNING: This port is currently ACTIVE. Changing VLAN may disrupt connected device."
-
-            if isinstance(available_vlans, list) and vlan_id not in available_vlans:
-                reply = f"VLAN {vlan_id} does not exist on this switch. Available VLANs: {available_vlans}"
-                return JSONResponse({"reply": reply, "step": "idle"})
-
-            session["pending_action"] = {
-                "type": "configure_port",
-                "interface": interface,
-                "vlan_id": vlan_id
-            }
-
-            reply = f"Port {interface} is currently {current_status}, speed {current_speed}, VLAN {current_vlan}.{warning}\n\nI plan to change VLAN to {vlan_id}.\nAvailable VLANs: {available_vlans}\n\nConfirm? (yes/no)"
-            return JSONResponse({"reply": reply, "step": "confirm"})
-
-        except Exception as e:
-            reply = f"Error getting port details: {str(e)}"
-            return JSONResponse({"reply": reply, "step": "idle"})
-
-    # ── Detect power action request ──
-    power_match = re_mod.search(
-        r'(restart|reboot|shutdown|power\s+off|power\s+on|turn\s+off|turn\s+on)\s+(?:server\s+)?([\w\-]+)',
-        msg.lower()
-    )
-
-    if power_match:
-        action_word = power_match.group(1).strip()
-        server_name = power_match.group(2).strip()
-
-        action_map = {
-            "restart": "GracefulRestart",
-            "reboot": "GracefulRestart",
-            "shutdown": "GracefulShutdown",
-            "power off": "ForceOff",
-            "turn off": "GracefulShutdown",
-            "power on": "On",
-            "turn on": "On"
+        if intent.get("clarification_needed"):
+            result = {"reply": intent["clarification_question"], "step": "idle"}
+        else:
+            intent.setdefault("parameters", {})["original_message"] = msg
+            router = AgentRouter()
+            result = router.route(intent, session)
+            if "pending_action" in result:
+                session["pending_action"] = result["pending_action"]
+    else:
+        # Gate 2 — conversation: skip classifier, go straight to GeneralAgent
+        from agents.general_agent import GeneralAgent
+        agent = GeneralAgent()
+        intent = {
+            "intent": "general_question",
+            "device_type": None,
+            "device_name": None,
+            "parameters": {"original_message": msg},
+            "confidence": "high",
+            "clarification_needed": False,
+            "clarification_question": None,
         }
-        action = action_map.get(action_word, "GracefulRestart")
+        result = agent.handle(intent, session, msg)
 
-        try:
-            from bmc import get_bmc_servers
-            servers = get_bmc_servers()
-            server_key = None
-            server_display_name = server_name
-
-            for key, srv in servers.items():
-                if server_name.lower() in srv.get("name", "").lower() or \
-                   server_name.lower() in key.lower() or \
-                   server_name in srv.get("ip", ""):
-                    server_key = key
-                    server_display_name = srv.get("name", key)
-                    break
-
-            if not server_key and servers:
-                server_key = list(servers.keys())[0]
-                server_display_name = servers[server_key].get("name", server_key)
-
-            if server_key:
-                session["pending_action"] = {
-                    "type": "power_action",
-                    "server_key": server_key,
-                    "action": action
-                }
-                reply = f"I plan to execute {action} on {server_display_name}.\n\nWARNING: This will affect the server immediately.\n\nConfirm? (yes/no)"
-                return JSONResponse({"reply": reply, "step": "confirm"})
-            else:
-                reply = "No servers found in database. Add servers via Settings page."
-                return JSONResponse({"reply": reply, "step": "idle"})
-
-        except Exception as e:
-            reply = f"Error: {str(e)}"
-            return JSONResponse({"reply": reply, "step": "idle"})
-
-    # ── Default — pass to DeepSeek with full context ──
-    context_parts = []
-    context_parts.append("""You are NexDeploy AI assistant for Cloudify Asia data centre.
-You help engineers with server deployment, network diagnostics, and infrastructure management.
-Answer in plain text only. Keep responses concise and practical — maximum 4 sentences.
-For switch port config say: 'Type: set port [PORT] to vlan [NUMBER]'
-For server power say: 'Type: restart/shutdown [server name]'""")
-
-    try:
-        servers = get_cache("servers")
-        if not servers:
-            servers = get_all_servers_status()
-        if servers:
-            server_lines = ["\nLIVE SERVER STATUS:"]
-            for key, s in servers.items():
-                if "error" not in s:
-                    server_lines.append(f"Server: {s.get('name', key)} | Power: {s.get('power_state')} | Health: {s.get('overall_health')} | RAM: {s.get('ram_gb')}GB")
-                    hd = s.get('health_details', {})
-                    for k, v in hd.items():
-                        if v != 'OK':
-                            server_lines.append(f"  ALERT: {k}: {v}")
-            context_parts.append("\n".join(server_lines))
-    except: pass
-
-    try:
-        switch = get_cache("switch")
-        if not switch:
-            from switch import get_switch_summary
-            switch = get_switch_summary()
-        if switch and "error" not in switch:
-            context_parts.append(f"\nSWITCH STATUS: {switch.get('up_count')} ports UP, {switch.get('down_count')} ports DOWN")
-    except: pass
-
-    try:
-        db_devices = get_devices()
-        if db_devices:
-            dev_lines = ["\nREGISTERED DEVICES:"]
-            for d in db_devices:
-                dev_lines.append(f"  {d.get('name')} | {d.get('ip')} | {d.get('type')} | {d.get('brand')}")
-            context_parts.append("\n".join(dev_lines))
-    except: pass
-
-    # Conversation history
-    history = session.get("history", [])
-    if history:
-        hist_lines = ["\nCONVERSATION HISTORY:"]
-        for h in history[-4:]:
-            hist_lines.append(f"Engineer: {h.get('user', '')}")
-            hist_lines.append(f"Assistant: {h.get('reply', '')[:100]}")
-        context_parts.append("\n".join(hist_lines))
-
-    context_parts.append(f"\nEngineer says: {msg}")
-    full_context = "\n".join(context_parts)
-
-    reply = ask_ai(full_context)
-
-    session["history"].append({"user": msg, "reply": reply})
+    session["history"].append({"user": msg, "reply": result.get("reply", "")})
     if len(session["history"]) > 20:
         session["history"] = session["history"][-20:]
-
+    save_session(session_token, session)
     log_action(user, "CHAT", f"Message: {msg[:50]}")
-    return JSONResponse({"reply": reply, "step": "idle"})
+    return JSONResponse({
+        "reply": result.get("reply", ""),
+        "action": result.get("action"),
+        "config": result.get("config"),
+        "step": result.get("step", "idle")
+    })
 
 @app.post("/run_diagnostic")
 async def run_diag(request: Request, session_token: str = Cookie(None)):
