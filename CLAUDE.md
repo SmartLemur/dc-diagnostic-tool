@@ -107,3 +107,26 @@ python3 -c "import sqlite3; conn = sqlite3.connect('/home/harris/diagnostic-tool
 # Push to GitHub
 cd ~/diagnostic-tool && git add . && git commit -m 'update' && git push origin main
 ```
+## Session Update — Latest Progress
+
+### Newly Built and Working
+- Agent architecture (IntentClassifier → AgentRouter → SwitchAgent/BMCAgent/GeneralAgent)
+- Two-gate chat pipeline (Gate 1 action detection, Gate 2 free conversation)
+- Session persistence in SQLite DB (survives refresh and restart)
+- Confirmation flow for all write operations
+- LLM command extraction via delimiter approach (provider-agnostic)
+- Parameter validation and normalisation in SwitchAgent
+- Brand to Netmiko type mapping (H3C → hp_comware etc)
+- Memory system (system_memory table, records all actions, injects context into LLM)
+- Auto device resolution (single device auto-selected, multiple prompts engineer)
+- VLAN creation before port assignment in command map
+
+### Still To Build
+- Fix 6 — SSE streaming LiveActionPanel (next priority)
+- Fix 7 — Context scoping per agent
+- Threading for parallel switch polling
+- Firewall/router/NAS device types
+- OS deployment
+- Role system (admin vs engineer)
+- LLM provider choice in setup.py
+- README with screenshots and demo GIF
