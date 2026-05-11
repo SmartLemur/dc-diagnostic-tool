@@ -219,15 +219,15 @@ def ask_ai(message, session_id=None):
             with open(env_path) as f:
                 for line in f:
                     line = line.strip()
-                    if line.startswith("DEEPSEEK_API_KEY"):
+                    if line.startswith("LLM_API_KEY"):
                         api_key = line.split("=", 1)[-1].strip().strip('"').strip("'")
-                    elif line.startswith("DEEPSEEK_BASE_URL"):
+                    elif line.startswith("LLM_BASE_URL"):
                         base_url = line.split("=", 1)[-1].strip().strip('"').strip("'")
-                    elif line.startswith("DEEPSEEK_MODEL"):
+                    elif line.startswith("LLM_MODEL"):
                         model = line.split("=", 1)[-1].strip().strip('"').strip("'")
 
         if not api_key:
-            return "API key not configured. Add DEEPSEEK_API_KEY to .env file."
+            return "API key not configured. Add LLM_API_KEY to .env file."
 
         response = requests.post(
             f"{base_url}/chat/completions",
@@ -503,6 +503,14 @@ def is_action_request(message, device_names):
         "port link", "access port", "trunk port",
         "trunk mode", "trunk permit", "link-type", "port trunk",
         "allow vlan", "permit vlan", "trunk vlan",
+        # Read queries — switch
+        "show vlan", "show mac", "show interface", "show port",
+        "which port", "which ports", "show lacp", "show stp",
+        "show spanning", "show arp", "show log", "show error",
+        "show statistic", "show traffic", "how many vlan",
+        "how many port", "list vlan", "list port", "what vlan",
+        "what port", "current vlan", "current port", "port status",
+        "vlan status", "link status", "interface status",
     ]
 
     for signal in ACTION_SIGNALS:
@@ -699,6 +707,289 @@ async def chat(request: Request, session_token: str = Cookie(None)):
         "config": result.get("config"),
         "step": result.get("step", "idle")
     })
+
+
+def _ensure_session_alive(session_id, app):
+    if not hasattr(app, "_ssh_sessions") or session_id not in app._ssh_sessions:
+        return False
+    sess = app._ssh_sessions[session_id]
+    try:
+        sess["conn"].find_prompt()
+        return True
+    except Exception:
+        try:
+            from agents.switch_agent import BRAND_TO_NETMIKO
+            from switch import connect_switch
+            switch = sess["switch"]
+            netmiko_type = BRAND_TO_NETMIKO.get(switch["brand"].lower(), "cisco_ios")
+            new_conn = connect_switch(switch["ip"], switch["username"], switch["password"], switch.get("brand", "unknown"))
+            sess["conn"] = new_conn
+            sess["last_used"] = __import__("time").time()
+            app._ssh_sessions[session_id] = sess
+            return True
+        except Exception:
+            return False
+
+
+@app.post("/chat/switch")
+async def switch_chat(request: Request, session_token: str = Cookie(None)):
+    user = get_user(session_token)
+    if not user:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    body = await request.json()
+    msg = body.get("message", "").strip()
+    switch_ip = body.get("switch_ip", "")
+    switch_name = body.get("switch_name", "")
+    session_id = body.get("session_id", "")
+
+    if not msg:
+        return JSONResponse({"reply": "", "step": "idle"})
+
+    devices = get_devices(device_type="switch")
+    switch = next((d for d in devices if d["ip"] == switch_ip), None)
+    if not switch:
+        return JSONResponse({"reply": "Switch not found.", "step": "idle"})
+
+    # Get shared SSH connection
+    conn = None
+    if hasattr(app, "_ssh_sessions") and session_id in app._ssh_sessions:
+        if _ensure_session_alive(session_id, app):
+            conn = app._ssh_sessions[session_id]["conn"]
+
+    if not conn:
+        return JSONResponse({"reply": "SSH session lost. Please close and reopen the switch page.", "step": "idle"})
+
+    # Handle pending confirmation
+    si_key = f"si_{session_token[:8]}"
+    if not hasattr(app, "_si_sessions"):
+        app._si_sessions = {}
+    si_sess = app._si_sessions.get(si_key, {})
+
+    if si_sess.get("pending_action") and msg.lower().strip() in ["yes", "y", "confirm"]:
+        pending = si_sess["pending_action"]
+        from agents.switch_page_ai import SwitchPageAI
+        ai = SwitchPageAI()
+        result = ai.execute_confirmed(pending["commands"], conn, switch, user)
+        si_sess["pending_action"] = None
+        app._si_sessions[si_key] = si_sess
+        from memory import record_action
+        record_action(
+            "switch_config",
+            f"Executed on {switch_name}: {', '.join(pending['commands'][:2])}",
+            switch_name,
+            user
+        )
+        log_action(user, "SWITCH_AI", f"Confirmed exec: {pending['commands']}")
+        return JSONResponse({
+            "reply": "Commands executed successfully." if result["success"] else "Execution failed.",
+            "raw_output": result["raw_output"],
+            "step": "idle"
+        })
+
+    if si_sess.get("pending_action") and msg.lower().strip() in ["no", "cancel", "n"]:
+        si_sess["pending_action"] = None
+        app._si_sessions[si_key] = si_sess
+        return JSONResponse({"reply": "Action cancelled.", "step": "idle"})
+
+    # Route through SwitchPageAI
+    from agents.switch_page_ai import SwitchPageAI
+    ai = SwitchPageAI()
+    result = ai.handle(msg, conn, switch, si_sess, user)
+
+    if result.get("pending_action"):
+        si_sess["pending_action"] = result["pending_action"]
+        app._si_sessions[si_key] = si_sess
+
+    log_action(user, "SWITCH_AI", f"Message: {msg[:50]}")
+
+    return JSONResponse({
+        "reply": result.get("reply", ""),
+        "raw_output": result.get("raw_output", ""),
+        "step": result.get("step", "idle")
+    })
+
+
+@app.get("/api/switch/changes/{switch_ip:path}")
+async def get_switch_changes_api(switch_ip: str, session_token: str = Cookie(None)):
+    user = get_user(session_token)
+    if not user:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    from database import get_switch_changes
+    changes = get_switch_changes(switch_ip)
+    return JSONResponse({"changes": changes})
+
+
+@app.get("/api/switch/intelligence/{switch_ip:path}")
+async def switch_intelligence(switch_ip: str, session_token: str = Cookie(None)):
+    user = get_user(session_token)
+    if not user:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    devices = get_devices(device_type="switch")
+    switch = next((d for d in devices if d["ip"] == switch_ip), None)
+    if not switch:
+        return JSONResponse({"error": "Switch not found"}, status_code=404)
+    return JSONResponse({"switch": {
+        "name": switch["name"],
+        "ip": switch["ip"],
+        "brand": switch["brand"],
+        "model": switch["model"]
+    }})
+
+
+@app.get("/api/switch/discover/{switch_ip:path}")
+async def discover_switch(switch_ip: str, session_token: str = Cookie(None)):
+    user = get_user(session_token)
+    if not user:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+    devices = get_devices(device_type="switch")
+    switch = next((d for d in devices if d["ip"] == switch_ip), None)
+    if not switch:
+        return JSONResponse({"error": "Switch not found"}, status_code=404)
+
+    try:
+        from agents.switch_agent import BRAND_TO_NETMIKO
+        brand = switch.get("brand", "unknown")
+        netmiko_type = BRAND_TO_NETMIKO.get(brand.lower(), "hp_comware")
+
+        from switch import connect_switch
+        conn = connect_switch(switch["ip"], switch["username"], switch["password"], brand)
+
+        discovery_commands = {
+            "hp_comware": {
+                "version": "display version",
+                "interfaces": "display interface brief",
+                "vlans": "display vlan all",
+                "lacp": "display lacp summary",
+                "lldp": "display lldp neighbor-information brief"
+            },
+            "cisco_ios": {
+                "version": "show version",
+                "interfaces": "show interface status",
+                "vlans": "show vlan brief",
+                "lacp": "show lacp summary",
+                "lldp": "show lldp neighbors"
+            }
+        }
+
+        commands = discovery_commands.get(netmiko_type, discovery_commands["hp_comware"])
+        results = {}
+        for key, cmd in commands.items():
+            try:
+                results[key] = conn.send_command(cmd)
+            except Exception as e:
+                results[key] = f"Error: {str(e)}"
+
+        conn.disconnect()
+
+        # Parse interfaces to extract port list
+        ports = []
+        if "interfaces" in results:
+            for line in results["interfaces"].split("\n"):
+                line = line.strip()
+                if any(line.startswith(p) for p in ["WGE", "HGE", "GE", "Ten", "Twenty", "Hundred", "Gi", "Fa", "Te", "Et"]):
+                    parts = line.split()
+                    if len(parts) >= 2:
+                        status = "UP" if "UP" in line.upper() and "DOWN" not in line.upper() else "DOWN"
+                        ports.append({"name": parts[0], "status": status, "raw": line})
+
+        # Parse VLANs
+        import re
+        vlans = []
+        if "vlans" in results:
+            seen = set()
+            for match in re.findall(r'VLAN ID:\s*(\d+)|^(\d+)\s+\w', results["vlans"], re.MULTILINE):
+                vid = match[0] or match[1]
+                if vid and vid not in seen:
+                    seen.add(vid)
+                    vlans.append({"id": vid})
+
+        return JSONResponse({
+            "switch": {"name": switch["name"], "ip": switch["ip"], "brand": brand, "netmiko_type": netmiko_type},
+            "ports": ports,
+            "vlans": vlans,
+            "raw": results
+        })
+
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/switch/session/start")
+async def start_switch_session(request: Request, session_token: str = Cookie(None)):
+    user = get_user(session_token)
+    if not user:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    body = await request.json()
+    switch_ip = body.get("switch_ip")
+    devices = get_devices(device_type="switch")
+    switch = next((d for d in devices if d["ip"] == switch_ip), None)
+    if not switch:
+        return JSONResponse({"error": "Switch not found"}, status_code=404)
+    try:
+        from agents.switch_agent import BRAND_TO_NETMIKO
+        from switch import connect_switch
+        brand = switch.get("brand", "unknown")
+        netmiko_type = BRAND_TO_NETMIKO.get(brand.lower(), "hp_comware")
+        conn = connect_switch(switch_ip, switch["username"], switch["password"], brand)
+        session_id = f"ssh_{switch_ip}_{session_token[:8]}"
+        if not hasattr(app, "_ssh_sessions"):
+            app._ssh_sessions = {}
+        import time as _time
+        app._ssh_sessions[session_id] = {
+            "conn": conn,
+            "switch": switch,
+            "netmiko_type": netmiko_type,
+            "last_used": _time.time(),
+        }
+        log_action(user, "SSH_SESSION_START", f"SSH session to {switch['name']} ({switch_ip})")
+        return JSONResponse({"session_id": session_id, "switch": switch["name"], "netmiko_type": netmiko_type})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/switch/session/command")
+async def run_switch_session_command(request: Request, session_token: str = Cookie(None)):
+    user = get_user(session_token)
+    if not user:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    body = await request.json()
+    session_id = body.get("session_id")
+    command = body.get("command", "").strip()
+    if not command:
+        return JSONResponse({"error": "No command provided"}, status_code=400)
+    if not _ensure_session_alive(session_id, app):
+        return JSONResponse({"error": "Session lost. Reconnecting failed. Please close and reopen the switch page.", "output": ""}, status_code=500)
+    sess = app._ssh_sessions[session_id]
+    try:
+        import time as _time
+        sess["last_used"] = _time.time()
+        output = sess["conn"].send_command(command, read_timeout=30)
+        return JSONResponse({"output": output, "command": command})
+    except Exception as e:
+        try:
+            del app._ssh_sessions[session_id]
+        except Exception:
+            pass
+        return JSONResponse({"error": f"Session lost: {str(e)}. Reconnect."}, status_code=500)
+
+
+@app.post("/api/switch/session/end")
+async def end_switch_session(request: Request, session_token: str = Cookie(None)):
+    user = get_user(session_token)
+    if not user:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    body = await request.json()
+    session_id = body.get("session_id")
+    if hasattr(app, "_ssh_sessions") and session_id in app._ssh_sessions:
+        try:
+            app._ssh_sessions[session_id]["conn"].disconnect()
+        except Exception:
+            pass
+        del app._ssh_sessions[session_id]
+    return JSONResponse({"status": "ended"})
+
 
 @app.post("/run_diagnostic")
 async def run_diag(request: Request, session_token: str = Cookie(None)):

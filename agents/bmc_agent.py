@@ -32,11 +32,11 @@ def _load_env():
         with open(env_path) as f:
             for line in f:
                 line = line.strip()
-                if line.startswith("DEEPSEEK_API_KEY"):
+                if line.startswith("LLM_API_KEY"):
                     api_key = line.split("=", 1)[-1].strip().strip('"').strip("'")
-                elif line.startswith("DEEPSEEK_BASE_URL"):
+                elif line.startswith("LLM_BASE_URL"):
                     base_url = line.split("=", 1)[-1].strip().strip('"').strip("'")
-                elif line.startswith("DEEPSEEK_MODEL"):
+                elif line.startswith("LLM_MODEL"):
                     model = line.split("=", 1)[-1].strip().strip('"').strip("'")
     return api_key, base_url, model
 

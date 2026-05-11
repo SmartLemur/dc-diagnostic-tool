@@ -8,6 +8,7 @@ from agents.bmc_agent import BMCAgent
 SWITCH_INTENTS = {
     "get_switch_config",
     "get_full_switch_config",
+    "show_switch_info",
     "configure_port_vlan",
     "configure_port_lacp",
 }

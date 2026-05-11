@@ -120,6 +120,78 @@
   <div class="drawer-body" id="port-drawer-content"></div>
 </div>
 
+<!-- Switch Picker Popup -->
+<div id="si-picker-overlay" style="display:none; position:fixed; inset:0; background:rgba(0,0,0,0.65); z-index:10000; align-items:center; justify-content:center;">
+  <div style="background:#161b22; border:1px solid #30363d; border-radius:12px; padding:20px; min-width:300px; max-width:420px; width:90vw;">
+    <div style="font-size:14px; font-weight:600; color:#e6edf3; margin-bottom:14px;">Select Switch</div>
+    <div id="si-picker-list"></div>
+    <button onclick="document.getElementById('si-picker-overlay').style.display='none';" style="margin-top:8px; width:100%; padding:8px; border-radius:6px; border:1px solid #30363d; background:transparent; color:#8b949e; cursor:pointer; font-size:12px;">Cancel</button>
+  </div>
+</div>
+
+<!-- Switch Intelligence Overlay -->
+<div id="switch-intelligence-overlay" style="display:none; position:fixed; top:0; left:0; width:100vw; height:100vh; background:#0d1117; z-index:9999; flex-direction:column;">
+
+  <!-- Topbar -->
+  <div style="height:48px; background:#161b22; border-bottom:1px solid #30363d; display:flex; align-items:center; padding:0 16px; gap:12px; flex-shrink:0;">
+    <button onclick="closeSwitchIntelligence()" style="font-size:13px; background:transparent; border:1px solid #30363d; color:#8b949e; padding:4px 10px; border-radius:6px; cursor:pointer;">← Back</button>
+    <span id="si-switch-name" style="font-size:14px; font-weight:500; color:#e6edf3;"></span>
+    <span id="si-switch-ip" style="font-size:12px; color:#8b949e;"></span>
+    <div style="flex:1;"></div>
+    <button onclick="closeSwitchIntelligence()" style="background:transparent; border:none; color:#8b949e; cursor:pointer; font-size:18px;">✕</button>
+  </div>
+
+  <!-- Split layout: 55% terminal | 45% AI chat -->
+  <div style="display:grid; grid-template-columns:55% 45%; flex:1; overflow:hidden;">
+
+    <!-- LEFT: SSH Terminal -->
+    <div style="display:flex; flex-direction:column; border-right:1px solid #30363d; overflow:hidden;">
+
+      <div style="height:40px; background:#161b22; border-bottom:1px solid #30363d; display:flex; align-items:center; padding:0 14px; gap:10px; flex-shrink:0;">
+        <span style="font-size:11px; font-weight:500; color:#8b949e; text-transform:uppercase; letter-spacing:0.06em;">SSH Terminal</span>
+        <span style="font-size:11px; color:#30363d;">—</span>
+        <span id="si-term-switch-label" style="font-size:12px; color:#e6edf3;"></span>
+        <div style="flex:1;"></div>
+        <span id="si-term-status" style="font-size:11px; padding:2px 8px; border-radius:999px; background:#3a1f1f; color:#f85149;">● Disconnected</span>
+      </div>
+
+      <div id="si-terminal" class="si-terminal"></div>
+
+      <div style="display:flex; align-items:center; gap:6px; padding:8px 12px; border-top:1px solid #30363d; background:#161b22; flex-shrink:0;">
+        <span id="si-term-prompt" style="font-family:'Courier New',Courier,monospace; font-size:13px; color:#58a6ff; white-space:nowrap; flex-shrink:0;">&gt;</span>
+        <input id="si-term-input" type="text" placeholder="Enter command..." class="si-term-input"
+               onkeydown="if(event.key==='Enter'){sendTerminalCommand(this.value);this.value='';}"/>
+        <button onclick="var i=document.getElementById('si-term-input');sendTerminalCommand(i.value);i.value='';"
+                style="font-size:12px; padding:5px 12px; border-radius:4px; background:#21262d; border:1px solid #30363d; color:#8b949e; cursor:pointer; flex-shrink:0;">↵</button>
+      </div>
+
+    </div>
+
+    <!-- RIGHT: AI Chatbot -->
+    <div style="display:flex; flex-direction:column; overflow:hidden; background:#0d1117;">
+
+      <div style="height:40px; background:#161b22; border-bottom:1px solid #30363d; display:flex; align-items:center; padding:0 14px; gap:8px; flex-shrink:0;">
+        <span style="font-size:11px; font-weight:500; color:#8b949e; text-transform:uppercase; letter-spacing:0.06em;">AI Assistant</span>
+        <span style="font-size:11px; color:#30363d;">—</span>
+        <span id="si-ai-switch-label" style="font-size:12px; color:#e6edf3;"></span>
+        <span style="font-size:11px; color:#8b949e;">only</span>
+      </div>
+
+      <div id="si-ai-msgs" style="flex:1; overflow-y:auto; padding:12px; display:flex; flex-direction:column; gap:8px;"></div>
+
+      <div style="display:flex; gap:6px; padding:8px 12px; border-top:1px solid #30363d; background:#161b22; flex-shrink:0;">
+        <input id="si-ai-input" type="text" placeholder="Ask about this switch..."
+               style="flex:1; font-size:12px; padding:6px 10px; border-radius:6px; border:1px solid #30363d; background:#0d1117; color:#e6edf3; outline:none;"
+               onkeydown="if(event.key==='Enter') sendSIChat()"/>
+        <button onclick="sendSIChat()" style="font-size:11px; padding:6px 14px; border-radius:6px; background:#1f6feb; color:#fff; border:none; cursor:pointer; flex-shrink:0;">Send</button>
+      </div>
+
+    </div>
+
+  </div>
+
+</div>
+
 <script src="/static/app.js"></script>
 <script>
   // Load default page on start

@@ -87,26 +87,46 @@ def get_netmiko_device_type(brand):
             return BRAND_TO_NETMIKO[key]
     return "hp_comware"
 
-def get_full_interface_name(interface, device_type):
-    """Convert short interface name to full name for commands"""
-    commands = SWITCH_COMMANDS.get(device_type, SWITCH_COMMANDS["hp_comware"])
+def get_full_interface_name(interface, device_type="hp_comware"):
+    """Convert short/bare interface name to full CLI name. Handles slot format and bare port numbers."""
+    import re
+
+    if not interface:
+        return interface
+
+    interface = interface.strip()
+
+    # Already in full format
+    if "Twenty-FiveGigE1/" in interface or "GigabitEthernet1/" in interface \
+            or "HundredGigE1/" in interface or "Ten-GigE1/" in interface:
+        return interface
+
+    # Extract port number — handle: WGE1/0/5, WGE 5, WGE5, wge1/0/5, bare "43"
+    slot_match = re.search(r'(\d+)/(\d+)/(\d+)', interface)
+    if slot_match:
+        port_num = slot_match.group(0)   # e.g. "1/0/5"
+    else:
+        num_match = re.search(r'(\d+)\s*$', interface.strip())
+        if num_match:
+            port_num = f"1/0/{num_match.group(1)}"
+        else:
+            return interface
+
+    iface_upper = interface.upper().replace(" ", "")
+    if iface_upper.startswith("WGE") or "TWENTYFIVEGIGE" in iface_upper:
+        return f"Twenty-FiveGigE{port_num}"
+    elif iface_upper.startswith("HGE") or "HUNDREDGIGE" in iface_upper:
+        return f"HundredGigE{port_num}"
+    elif iface_upper.startswith("TE") or "TEN-GIGE" in iface_upper or "TENGIGE" in iface_upper:
+        return f"Ten-GigE{port_num}"
+    elif iface_upper.startswith("GE") or "GIGABITETHERNET" in iface_upper:
+        return f"GigabitEthernet{port_num}"
+
+    # Cisco / other brands — use prefix from SWITCH_COMMANDS
+    commands = SWITCH_COMMANDS.get(device_type, {})
     prefix = commands.get("interface_full_prefix", "")
-
-    if not prefix:
-        return interface
-
-    # Already has full name
-    if prefix.lower() in interface.lower():
-        return interface
-
-    # WGE1/0/5 → Twenty-FiveGigE1/0/5
-    if device_type == "hp_comware":
-        if interface.startswith("WGE"):
-            return interface.replace("WGE", "Twenty-FiveGigE")
-        elif interface.startswith("HGE"):
-            return interface.replace("HGE", "HundredGigE")
-        elif interface.startswith("GE"):
-            return interface.replace("GE", "GigabitEthernet")
+    if prefix and not interface.lower().startswith(prefix.lower()):
+        return f"{prefix}{port_num}"
 
     return interface
 

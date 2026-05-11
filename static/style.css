@@ -693,6 +693,32 @@ body {
   margin-bottom: 0.75rem;
 }
 
+/* ── Switch Intelligence ── */
+.si-terminal {
+  flex: 1;
+  overflow-y: auto;
+  background: #0d1117;
+  padding: 12px;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  color: #c9d1d9;
+}
+
+.si-term-input {
+  flex: 1;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 13px;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 5px 8px;
+  color: #e6edf3;
+  outline: none;
+}
+
+.si-term-input:focus { border-color: #58a6ff; }
+
 .drawer-raw-config {
   background: #0f1117;
   border: 1px solid #2d3748;

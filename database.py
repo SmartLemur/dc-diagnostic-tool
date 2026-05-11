@@ -87,6 +87,20 @@ def init_db():
     except sqlite3.OperationalError:
         pass  # column already exists
 
+    c.execute("""
+    CREATE TABLE IF NOT EXISTS switch_changes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        switch_name TEXT NOT NULL,
+        switch_ip TEXT NOT NULL,
+        description TEXT NOT NULL,
+        interface TEXT,
+        commands_sent TEXT NOT NULL,
+        config_before TEXT NOT NULL,
+        config_after TEXT NOT NULL,
+        triggered_by TEXT NOT NULL,
+        timestamp TEXT DEFAULT (datetime('now'))
+    )""")
+
     conn.commit()
     conn.close()
     init_system_memory()
@@ -171,6 +185,27 @@ def get_recent_memories(limit=10):
         {"category": r[0], "device_name": r[1], "summary": r[2], "timestamp": r[3], "triggered_by": r[4]}
         for r in rows
     ]
+
+
+def save_switch_change(switch_name, switch_ip, description, interface, commands_sent, config_before, config_after, triggered_by):
+    conn = sqlite3.connect(DB_PATH)
+    conn.execute(
+        "INSERT INTO switch_changes (switch_name, switch_ip, description, interface, commands_sent, config_before, config_after, triggered_by) VALUES (?,?,?,?,?,?,?,?)",
+        (switch_name, switch_ip, description, interface, json.dumps(commands_sent), config_before, config_after, triggered_by)
+    )
+    conn.commit()
+    conn.close()
+
+
+def get_switch_changes(switch_ip, limit=20):
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    rows = conn.execute(
+        "SELECT * FROM switch_changes WHERE switch_ip=? ORDER BY id DESC LIMIT ?",
+        (switch_ip, limit)
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 def get_memory_count():

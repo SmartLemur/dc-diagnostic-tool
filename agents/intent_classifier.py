@@ -6,6 +6,7 @@ import requests
 INTENT_TYPES = [
     "get_switch_config",
     "get_full_switch_config",
+    "show_switch_info",
     "configure_port_vlan",
     "configure_port_lacp",
     "get_server_health",
@@ -38,6 +39,7 @@ Classify the engineer's message and return ONLY valid JSON.
 Possible intent types:
 - get_switch_config         : view config or status of a specific port
 - get_full_switch_config    : view full switch running configuration
+- show_switch_info          : query switch tables or status without a specific port — VLAN table, MAC table, ARP table, port summary, STP, LACP, error counters, traffic stats
 - configure_port_vlan       : change or assign a VLAN on a port
 - configure_port_lacp       : configure LACP/port-channel/bonding on a port
 - get_server_health         : check server hardware health, sensors, power state
@@ -73,6 +75,10 @@ Rules:
 
 EXAMPLES (always classify these correctly regardless of phrasing):
 - "show full config" / "show switch config" / "display running config" / "full config" → get_full_switch_config, high confidence
+- "show vlan" / "list vlans" / "what vlans" / "how many vlans" / "vlan table" → show_switch_info, high confidence
+- "show mac" / "mac table" / "mac address table" → show_switch_info, high confidence
+- "which ports are up" / "port status" / "interface status" / "show port summary" → show_switch_info, high confidence
+- "show arp" / "show lacp" / "show stp" / "spanning tree" / "show error" → show_switch_info, high confidence
 - "show server health" / "server status" / "how is the server" / "is server ok" → get_server_health, high confidence
 - "set port X to vlan Y" / "change port X vlan Y" / "configure port X vlan Y" → configure_port_vlan, high confidence
 - "restart server" / "reboot server" / "power off server" → server_power_action, high confidence
@@ -91,11 +97,11 @@ def _load_env():
         with open(env_path) as f:
             for line in f:
                 line = line.strip()
-                if line.startswith("DEEPSEEK_API_KEY"):
+                if line.startswith("LLM_API_KEY"):
                     api_key = line.split("=", 1)[-1].strip().strip('"').strip("'")
-                elif line.startswith("DEEPSEEK_BASE_URL"):
+                elif line.startswith("LLM_BASE_URL"):
                     base_url = line.split("=", 1)[-1].strip().strip('"').strip("'")
-                elif line.startswith("DEEPSEEK_MODEL"):
+                elif line.startswith("LLM_MODEL"):
                     model = line.split("=", 1)[-1].strip().strip('"').strip("'")
     return api_key, base_url, model
 

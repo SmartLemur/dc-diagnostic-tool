@@ -215,7 +215,7 @@ function loadSwitches(version) {
       var html = '';
       html += '<div class="section-header">';
       html += '<span class="section-title">Switch Port Status</span>';
-      html += '<button class="btn btn-outline" style="margin-left:auto" onclick="document.getElementById(\'chatInput\').value=\'show full config\';sendChat()">Full Switch Config</button>';
+      html += '<button class="btn btn-outline" style="margin-left:auto" onclick="chooseSwitchForSI()">Ask AI</button>';
       html += '<button class="btn btn-primary" onclick="showAddDevice(\'switch\')">+ Add Switch</button>';
       html += '</div>';
       if (data.error) {
@@ -432,9 +432,6 @@ function sendChat() {
   .then(function(data) {
     thinking.remove();
     addChatMsg(data.reply, 'ai');
-    if (data.action === 'show_full_config') {
-      openConfigDrawer(data.config || '');
-    }
     if (data.run_diagnostic && data.data) {
       var running = addChatMsg('Running checks... please wait', 'thinking');
       fetch('/run_diagnostic', {
@@ -499,18 +496,6 @@ function openPortDrawer(iface) {
     });
 }
 
-function openConfigDrawer(config) {
-  document.getElementById('port-drawer').classList.add('open');
-  document.getElementById('port-drawer-overlay').classList.add('open');
-  document.getElementById('port-drawer-title').textContent = 'Full Switch Configuration';
-  var escaped = config.replace(/&/g, '&amp;').replace(/</g, '&lt;');
-  document.getElementById('port-drawer-content').innerHTML =
-    '<div class="drawer-section">' +
-    '<div class="drawer-section-title">Running Configuration</div>' +
-    '<pre class="drawer-raw-config">' + escaped + '</pre>' +
-    '</div>';
-}
-
 function closePortDrawer() {
   document.getElementById('port-drawer').classList.remove('open');
   document.getElementById('port-drawer-overlay').classList.remove('open');
@@ -562,3 +547,238 @@ setInterval(function() {
     case 'eventlog': loadEventLog(v); break;
   }
 }, 30000);
+
+// ── Switch Intelligence ──
+var currentSISwitch = null;
+var currentSISessionId = null;
+var currentSIPrompt = '>';
+
+function chooseSwitchForSI() {
+  fetch('/api/devices', {credentials: 'include'})
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      var switches = (data.devices || []).filter(function(d) { return d.type === 'switch'; });
+      if (switches.length === 0) {
+        alert('No switches registered. Add a switch in Settings first.');
+        return;
+      }
+      if (switches.length === 1) {
+        openSwitchIntelligence(switches[0].ip, switches[0].name);
+        return;
+      }
+      var list = document.getElementById('si-picker-list');
+      list.innerHTML = '';
+      switches.forEach(function(sw) {
+        var btn = document.createElement('div');
+        btn.style.cssText = 'padding:10px 12px;border-radius:6px;cursor:pointer;border:1px solid #30363d;margin-bottom:6px;';
+        btn.innerHTML = '<div style="font-size:13px;font-weight:600;color:#e6edf3;">' + siEscHtml(sw.name) + '</div>' +
+          '<div style="font-size:11px;color:#8b949e;margin-top:2px;">' + siEscHtml(sw.ip) + (sw.brand ? ' · ' + siEscHtml(sw.brand) : '') + '</div>';
+        btn.onmouseenter = function() { btn.style.background = '#21262d'; };
+        btn.onmouseleave = function() { btn.style.background = ''; };
+        btn.onclick = function() {
+          document.getElementById('si-picker-overlay').style.display = 'none';
+          openSwitchIntelligence(sw.ip, sw.name);
+        };
+        list.appendChild(btn);
+      });
+      document.getElementById('si-picker-overlay').style.display = 'flex';
+    })
+    .catch(function() { alert('Could not load switches.'); });
+}
+
+function appendToTerminal(text, color) {
+  var term = document.getElementById('si-terminal');
+  if (!term) return;
+  var line = document.createElement('div');
+  if (color) line.style.color = color;
+  line.style.whiteSpace = 'pre-wrap';
+  line.style.wordBreak = 'break-word';
+  line.textContent = text;
+  term.appendChild(line);
+  term.scrollTop = term.scrollHeight;
+}
+
+function addSIAiMsg(text, role) {
+  var msgs = document.getElementById('si-ai-msgs');
+  if (!msgs) return null;
+  var d = document.createElement('div');
+  if (role === 'user') {
+    d.style.cssText = 'background:#1f6feb;color:#fff;padding:8px 12px;border-radius:8px;border-bottom-right-radius:2px;max-width:85%;align-self:flex-end;font-size:12px;line-height:1.5;word-break:break-word;white-space:pre-wrap;';
+    d.textContent = text;
+  } else if (role === 'thinking') {
+    d.style.cssText = 'background:#21262d;color:#8b949e;padding:8px 12px;border-radius:8px;border-bottom-left-radius:2px;max-width:85%;align-self:flex-start;font-size:12px;font-style:italic;';
+    d.textContent = text;
+  } else {
+    d.style.cssText = 'background:#21262d;color:#e6edf3;padding:8px 12px;border-radius:8px;border-bottom-left-radius:2px;max-width:85%;align-self:flex-start;font-size:12px;line-height:1.5;word-break:break-word;';
+    var parts = text.split('**');
+    var result = '';
+    for (var i = 0; i < parts.length; i++) {
+      result += i % 2 === 1 ? '<strong>' + parts[i] + '</strong>' : parts[i];
+    }
+    result = result.replace(/`([^`\n]+)`/g, '<code style="background:#0d1117;padding:1px 4px;border-radius:3px;font-family:monospace;font-size:11px">$1</code>');
+    result = result.split('\n').join('<br>');
+    d.innerHTML = result;
+  }
+  msgs.appendChild(d);
+  msgs.scrollTop = msgs.scrollHeight;
+  return d;
+}
+
+function openSwitchIntelligence(switchIp, switchName) {
+  if (!switchIp) { alert('No switch IP available.'); return; }
+  currentSISwitch = {ip: switchIp, name: switchName};
+  currentSISessionId = null;
+
+  var overlay = document.getElementById('switch-intelligence-overlay');
+  overlay.style.display = 'flex';
+  document.getElementById('si-switch-name').textContent = switchName;
+  document.getElementById('si-switch-ip').textContent = switchIp;
+  document.getElementById('si-term-switch-label').textContent = switchName;
+  document.getElementById('si-ai-switch-label').textContent = switchName;
+
+  document.getElementById('si-terminal').innerHTML = '';
+  document.getElementById('si-term-prompt').textContent = '>';
+  document.getElementById('si-term-input').value = '';
+  document.getElementById('si-ai-msgs').innerHTML = '';
+  document.getElementById('si-ai-input').value = '';
+
+  var statusEl = document.getElementById('si-term-status');
+  statusEl.textContent = '● Disconnected';
+  statusEl.style.background = '#3a1f1f';
+  statusEl.style.color = '#f85149';
+
+  appendToTerminal('Connecting to ' + switchName + ' (' + switchIp + ')...', '#8b949e');
+
+  fetch('/api/switch/session/start', {
+    method: 'POST',
+    credentials: 'include',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({switch_ip: switchIp})
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    if (data.error) {
+      appendToTerminal('Connection failed: ' + data.error, '#f85149');
+      return;
+    }
+    currentSISessionId = data.session_id;
+    var nt = data.netmiko_type || '';
+    var prompt = nt.indexOf('comware') !== -1 ? '<H3C>' : nt.indexOf('cisco') !== -1 ? '#' : '>';
+    currentSIPrompt = prompt;
+    document.getElementById('si-term-prompt').textContent = prompt + ' ';
+    statusEl.textContent = '● Connected';
+    statusEl.style.background = '#0d3a1f';
+    statusEl.style.color = '#3fb950';
+    appendToTerminal('Connected to ' + (data.switch || switchName) + '.', '#3fb950');
+    appendToTerminal('', '');
+    addSIAiMsg('Connected to ' + switchName + ' (' + switchIp + ').\n\nI\'m scoped to this switch only. Ask me about its config, ports, VLANs, or tell me to make changes.', 'ai');
+  })
+  .catch(function(e) {
+    appendToTerminal('Connection error: ' + (e.message || 'unknown'), '#f85149');
+  });
+}
+
+function closeSwitchIntelligence() {
+  if (currentSISessionId) {
+    fetch('/api/switch/session/end', {
+      method: 'POST',
+      credentials: 'include',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({session_id: currentSISessionId})
+    }).catch(function() {});
+    currentSISessionId = null;
+  }
+  document.getElementById('switch-intelligence-overlay').style.display = 'none';
+  currentSISwitch = null;
+}
+
+function sendTerminalCommand(command) {
+  command = command ? command.trim() : '';
+  if (!command) return;
+  if (!currentSISessionId) {
+    appendToTerminal('Not connected. Close and reopen Ask AI to reconnect.', '#f85149');
+    return;
+  }
+  appendToTerminal(currentSIPrompt + ' ' + command, '#e6edf3');
+  fetch('/api/switch/session/command', {
+    method: 'POST',
+    credentials: 'include',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({session_id: currentSISessionId, command: command})
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    if (data.error) {
+      appendToTerminal(data.error, '#f85149');
+      if (data.error.indexOf('Session') !== -1) {
+        currentSISessionId = null;
+        var s = document.getElementById('si-term-status');
+        s.textContent = '● Disconnected';
+        s.style.background = '#3a1f1f';
+        s.style.color = '#f85149';
+      }
+      return;
+    }
+    if (data.output) appendToTerminal(data.output, '#8b949e');
+    appendToTerminal('', '');
+  })
+  .catch(function(e) {
+    appendToTerminal('Error: ' + (e.message || 'unknown'), '#f85149');
+  });
+}
+
+function sendSIChat() {
+  var input = document.getElementById('si-ai-input');
+  var msg = input.value.trim();
+  if (!msg) return;
+  input.value = '';
+
+  addSIAiMsg(msg, 'user');
+  var thinking = addSIAiMsg('Thinking...', 'thinking');
+
+  var body = {
+    message: msg,
+    switch_ip: currentSISwitch ? currentSISwitch.ip : '',
+    switch_name: currentSISwitch ? currentSISwitch.name : '',
+    session_id: currentSISessionId || ''
+  };
+
+  fetch('/chat/switch', {
+    method: 'POST',
+    credentials: 'include',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body)
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(data) {
+    thinking.remove();
+    addSIAiMsg(data.reply || 'No response', 'ai');
+    var ro = data.raw_output;
+    if (ro && (typeof ro !== 'string' || ro.trim())) {
+      if (typeof ro === 'string') {
+        appendToTerminal(ro, '#8b949e');
+      } else {
+        var cmds = Array.isArray(ro.commands_sent) ? ro.commands_sent : [];
+        cmds.forEach(function(cmd) { appendToTerminal(currentSIPrompt + ' ' + cmd, '#e6edf3'); });
+        if (ro.device_response) appendToTerminal(ro.device_response, '#8b949e');
+        if (ro.verification) {
+          appendToTerminal('--- Verification ---', '#58a6ff');
+          appendToTerminal(ro.verification, '#8b949e');
+        }
+      }
+      appendToTerminal('', '');
+    }
+  })
+  .catch(function() {
+    thinking.remove();
+    addSIAiMsg('Connection error. Please try again.', 'ai');
+  });
+}
+
+function siEscHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}

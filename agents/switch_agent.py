@@ -24,11 +24,11 @@ def _load_env():
         with open(env_path) as f:
             for line in f:
                 line = line.strip()
-                if line.startswith("DEEPSEEK_API_KEY"):
+                if line.startswith("LLM_API_KEY"):
                     api_key = line.split("=", 1)[-1].strip().strip('"').strip("'")
-                elif line.startswith("DEEPSEEK_BASE_URL"):
+                elif line.startswith("LLM_BASE_URL"):
                     base_url = line.split("=", 1)[-1].strip().strip('"').strip("'")
-                elif line.startswith("DEEPSEEK_MODEL"):
+                elif line.startswith("LLM_MODEL"):
                     model = line.split("=", 1)[-1].strip().strip('"').strip("'")
     return api_key, base_url, model
 
@@ -68,6 +68,28 @@ def _extract_cli_commands(raw_text: str) -> list[str]:
                     return commands
         except Exception:
             pass
+
+    # Fallback: inline backtick-quoted commands (e.g. `display interface brief`)
+    import re
+    inline = re.findall(r'`([^`\n]{3,80})`', raw_text)
+    if inline:
+        # Skip format placeholder tokens like [single CLI command here]
+        real = [m.strip() for m in inline if m.strip() and not m.strip().startswith("[")]
+        commands = _filter(real)
+        if commands:
+            return commands
+
+    # Last resort: find a lone CLI command line (display/show/get at start of line)
+    CLI_PREFIXES = ("display ", "show ", "get ", "ping ", "traceroute ")
+    lone = []
+    for line in raw_text.splitlines():
+        stripped = line.strip()
+        if any(stripped.lower().startswith(p) for p in CLI_PREFIXES):
+            lone.append(stripped)
+    if lone:
+        commands = _filter(lone)
+        if commands:
+            return [commands[-1]]  # take last occurrence (most likely the final answer)
 
     return []
 
@@ -113,6 +135,32 @@ def _llm_generate_commands(brand: str, netmiko_type: str, task_description: str)
     return commands
 
 
+def _ask_llm(system: str, user: str, max_tokens: int = 500) -> str:
+    api_key, base_url, model = _load_env()
+    if not api_key:
+        return "AI unavailable — API key not configured."
+    try:
+        resp = requests.post(
+            f"{base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+                "max_tokens": max_tokens,
+                "temperature": 0.1,
+            },
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            return resp.json()["choices"][0]["message"]["content"].strip()
+        return f"AI error {resp.status_code}."
+    except Exception:
+        return "AI is currently unavailable. Please try again shortly."
+
+
 def _find_device(device_name: str, device_type: str = "switch"):
     devices = get_devices(device_type=device_type)
     if device_name:
@@ -123,21 +171,30 @@ def _find_device(device_name: str, device_type: str = "switch"):
     return devices[0] if devices else None
 
 
-def _execute_commands(device: dict, commands):
+def _execute_commands(device: dict, commands, conn=None):
     """Connect and run commands. Returns raw output string."""
     ip = device["ip"]
     username = device["username"]
     password = device["password"]
     brand = device.get("brand", "unknown")
 
-    conn = connect_switch(ip, username, password, brand)
+    _own_conn = conn is None
     try:
+        if _own_conn:
+            conn = connect_switch(ip, username, password, brand)
         if isinstance(commands, list):
             output = conn.send_config_set(commands)
         else:
             output = conn.send_command(commands, read_timeout=30)
-    finally:
-        conn.disconnect()
+        if _own_conn:
+            conn.disconnect()
+    except Exception:
+        if _own_conn and conn is not None:
+            try:
+                conn.disconnect()
+            except Exception:
+                pass
+        raise
     return output
 
 
@@ -157,6 +214,89 @@ BRAND_TO_NETMIKO = {
 
 
 class SwitchAgent:
+    def _capability_query(self, name: str, brand: str, netmiko_type: str, device: dict, params: dict) -> dict:
+        from hardware.switch_commands import SWITCH_COMMANDS
+        original = params.get("original_message", "What operations do you support on this device?")
+        ops = list(SWITCH_COMMANDS.get(netmiko_type, {}).keys())
+        ops_str = ", ".join(ops) if ops else "none in verified map"
+        model_name = device.get("model", "Unknown")
+        reply = _ask_llm(
+            system=(
+                "You are a senior network engineer. Answer whether the specified operation "
+                "is supported on this device and how to configure it. Be specific to the "
+                "device brand and model."
+            ),
+            user=(
+                f"Device: {name} | Brand: {brand} | Model: {model_name} | Netmiko type: {netmiko_type}\n"
+                f"Verified operations available: {ops_str}\n"
+                f"Engineer's question: {original}"
+            ),
+        )
+        return {"reply": reply, "step": "idle"}
+
+    def _resolve_read_command(self, task: str, brand: str, netmiko_type: str,
+                               device_name: str, ip: str, username: str, password: str, conn=None) -> dict:
+        # Step 1 — Ask LLM what command to run
+        raw_llm = _ask_llm(
+            system=(
+                "You are a network engineer expert in CLI commands for all vendors.\n"
+                "Given a device brand and task, output the exact CLI read command.\n\n"
+                "STRICT OUTPUT FORMAT — follow exactly:\n"
+                "1. Think silently (do not output reasoning)\n"
+                "2. Output ONLY this structure:\n\n"
+                "---COMMANDS---\n"
+                "[one CLI command]\n"
+                "---END---\n\n"
+                "No explanations. No reasoning. No markdown. No backticks. "
+                "Only the raw command between delimiters."
+            ),
+            user=f"Brand: {brand}, Netmiko type: {netmiko_type}, Task: {task}",
+            max_tokens=500,
+        )
+        commands = _extract_cli_commands(raw_llm)
+
+        if not commands:
+            return {"reply": f"I could not determine the right command for: {task}", "step": "idle"}
+
+        command = commands[0]
+
+        # Step 2 — Execute on real switch
+        _own_conn = conn is None
+        try:
+            if _own_conn:
+                conn = connect_switch(ip, username, password, brand)
+            raw_output = conn.send_command(command, read_timeout=30)
+            if _own_conn:
+                conn.disconnect()
+        except Exception as e:
+            if _own_conn and conn is not None:
+                try:
+                    conn.disconnect()
+                except Exception:
+                    pass
+            return {"reply": f"Could not connect to {device_name}: {e}", "step": "idle"}
+
+        # Step 3 — Try to parse with ntc-templates
+        parsed = None
+        try:
+            from ntc_templates.parse import parse_output
+            parsed = parse_output(platform=netmiko_type, command=command, data=raw_output)
+        except Exception:
+            pass
+
+        # Step 4 — Ask LLM to summarize
+        summary = _ask_llm(
+            system="Summarize this network device output in 2-3 sentences in plain English. Focus on what matters for the engineer.",
+            user=f"Device: {device_name}\nCommand: {command}\nOutput: {raw_output[:800]}",
+            max_tokens=200,
+        )
+
+        return {
+            "reply": summary,
+            "raw_output": f"<H3C> {command}\n{raw_output}",
+            "step": "idle",
+        }
+
     def _validate_parameters(self, operation: str, parameters: dict, device_name) -> dict | None:
         if not device_name:
             return {"error": "No target device specified. Please name the switch."}
@@ -252,24 +392,24 @@ class SwitchAgent:
         interface_raw = params.get("interface") or params.get("port") or ""
         interface_full = get_full_interface_name(interface_raw, netmiko_type) if interface_raw else ""
 
+        # Reuse caller's SSH connection if available (avoids opening duplicate session)
+        ssh_conn = params.get("ssh_conn")
+
         # ── Map intent to operation ───────────────────────────────────────
         if intent_type == "get_switch_config":
             operation = "show_interface"
         elif intent_type == "get_full_switch_config":
             operation = "show_full_config"
+        elif intent_type == "show_switch_info":
+            task = params.get("original_message") or "Show switch status"
+            return self._resolve_read_command(
+                task, brand, netmiko_type, name, ip,
+                device["username"], device["password"], conn=ssh_conn
+            )
         elif intent_type == "configure_port_vlan":
             operation = "set_vlan"
         elif intent_type == "capability_query":
-            return {
-                "reply": (
-                    f"I can do the following on {name} ({brand}):\n"
-                    "• Show port config or full running config\n"
-                    "• Configure port VLAN\n"
-                    "• Show VLAN table, MAC table, LACP summary\n"
-                    "• LLM-assisted commands for operations not in the verified map"
-                ),
-                "step": "idle",
-            }
+            return self._capability_query(name, brand, netmiko_type, device, params)
         else:
             operation = "show_full_config"
 
@@ -292,9 +432,18 @@ class SwitchAgent:
                 cmd_kwargs["vlan_id"] = vlan_id
             commands = get_command(netmiko_type, operation, **cmd_kwargs)
         except KeyError:
-            # Brand or operation not in verified map — fall through to LLM
-            task_description = f"Operation: {operation}. Parameters: {params}"
-            llm_generated = True
+            _WRITE_OPS = {"set_vlan", "set_trunk"}
+            if operation in _WRITE_OPS:
+                # Write op not in verified map — LLM generate + confirm gate
+                task_description = f"Operation: {operation}. Parameters: {params}"
+                llm_generated = True
+            else:
+                # Read op not in verified map — resolve and execute immediately
+                task = params.get("original_message") or f"Operation: {operation} on {brand}"
+                return self._resolve_read_command(
+                    task, brand, netmiko_type, name, ip,
+                    device["username"], device["password"], conn=ssh_conn
+                )
 
         if llm_generated:
             try:
@@ -340,7 +489,7 @@ class SwitchAgent:
 
         # ── Execute read commands immediately ─────────────────────────────
         try:
-            output = _execute_commands(device, commands)
+            output = _execute_commands(device, commands, conn=ssh_conn)
         except NetmikoAuthenticationException:
             return {
                 "reply": f"Cannot connect to {name} ({ip}): authentication failed. Check credentials.",
@@ -383,7 +532,7 @@ class SwitchAgent:
         if operation == "set_vlan" and interface_full:
             try:
                 verify_cmd = get_command(netmiko_type, "verify_vlan", interface=interface_full)
-                verification = _execute_commands(device, verify_cmd)
+                verification = _execute_commands(device, verify_cmd, conn=ssh_conn)
             except Exception:
                 verification = "(verification unavailable)"
 

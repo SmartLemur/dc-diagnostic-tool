@@ -130,3 +130,24 @@ cd ~/diagnostic-tool && git add . && git commit -m 'update' && git push origin m
 - Role system (admin vs engineer)
 - LLM provider choice in setup.py
 - README with screenshots and demo GIF
+
+## Session Update — Switch AI Page
+
+### Built today
+- Switch Intelligence Page rebuilt — full screen overlay, left SSH terminal, right AI chatbot
+- Persistent SSH session endpoints: /api/switch/session/start, /api/switch/session/command, /api/switch/session/end
+- Auto-reconnect when SSH session drops (_ensure_session_alive)
+- Dedicated /chat/switch endpoint separated from main /chat
+- SwitchPageAI class (agents/switch_page_ai.py) — no IntentClassifier, no AgentRouter, dedicated
+- LLM provider renamed to LLM_API_KEY, LLM_BASE_URL, LLM_MODEL (universal, not DeepSeek-specific)
+
+### Current problem to fix tomorrow
+- SwitchPageAI LLM generates wrong interface names (e.g. GigabitEthernet instead of Twenty-FiveGigE)
+- Fix: on page open, run discovery commands on real switch, store exact port names and model
+- Inject that real context into every LLM call so commands are always correct
+- Must be fully dynamic — works for any switch brand, any port type
+
+### Core principle (locked)
+EVERYTHING MUST BE DYNAMIC. No hardcoded commands, interface names, 
+Redfish paths, device types, port prefixes anywhere. Every agent must 
+query real device first. LLM always gets real device context injected.
